@@ -11,19 +11,19 @@
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { margin: 0; font: 16px/1.4 -apple-system, system-ui, sans-serif; color: #111; background: #f4f5f7; }
   header { position: sticky; top: 0; z-index: 10; background: #fff; border-bottom: 1px solid #e2e4e8;
-  padding: var(--pad); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+           padding: var(--pad); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   header h1 { font-size: 17px; margin: 0; flex: 1 1 100%; }
   button { font: inherit; border: 0; border-radius: 10px; padding: 12px 16px; background: #1877f2; color: #fff;
-  font-weight: 600; cursor: pointer; }
+           font-weight: 600; cursor: pointer; }
   button.secondary { background: #e4e6eb; color: #111; }
   button:disabled { opacity: .5; }
   .count { font-size: 13px; color: #606770; margin-left: auto; }
   #list { padding: var(--pad); display: grid; gap: 12px; }
   .card { background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 2px rgba(0,0,0,.08);
-  display: grid; grid-template-columns: 120px 1fr auto; align-items: stretch; }
+          display: grid; grid-template-columns: 120px 1fr auto; align-items: stretch; }
   .thumb { position: relative; width: 120px; height: 96px; background: #dde1e7 center/cover no-repeat; }
   .thumb .pin { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-100%); font-size: 22px;
-  text-shadow: 0 1px 2px rgba(0,0,0,.5); }
+                text-shadow: 0 1px 2px rgba(0,0,0,.5); }
   .meta { padding: 10px 12px; min-width: 0; }
   .meta .name { font-weight: 600; }
   .meta .name.empty { color: #b0b3b8; font-weight: 400; font-style: italic; }
@@ -33,15 +33,15 @@
   .empty-state { text-align: center; color: #8a8d91; padding: 48px 24px; }
   /* modal */
   #modal { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; z-index: 100;
-  align-items: flex-end; }
+           align-items: flex-end; }
   #modal.open { display: flex; }
   .sheet { background: #fff; width: 100%; max-height: 92vh; border-radius: 16px 16px 0 0; display: flex;
-  flex-direction: column; overflow: hidden; }
+           flex-direction: column; overflow: hidden; }
   .sheet .head { padding: var(--pad); border-bottom: 1px solid #eee; display: flex; align-items: center; gap: 10px; }
   .sheet .head h2 { font-size: 16px; margin: 0; flex: 1; }
   .sheet .body { padding: var(--pad); overflow: auto; }
   .scan-row { display: flex; align-items: center; gap: 12px; padding: 14px 10px; border-radius: 10px; cursor: pointer;
-  border: 1px solid #eee; margin-bottom: 8px; }
+              border: 1px solid #eee; margin-bottom: 8px; }
   .scan-row:active { background: #f0f2f5; }
   .scan-row .sig { font-size: 13px; color: #606770; white-space: nowrap; }
   .scan-row .id { font: 12px/1.3 ui-monospace, monospace; word-break: break-all; flex: 1; }
@@ -55,7 +55,7 @@
   .hint { font-size: 13px; color: #8a8d91; }
   .banner { background: #fff3cd; color: #664d03; padding: 12px var(--pad); font-size: 14px; }
   #jsonout { width: 100%; height: 160px; font: 12px/1.4 ui-monospace, monospace; padding: 10px;
-  border: 1px solid #ccd0d5; border-radius: 10px; margin-top: 12px; display: none; }
+             border: 1px solid #ccd0d5; border-radius: 10px; margin-top: 12px; display: none; }
 </style>
 </head>
 <body>
@@ -74,11 +74,11 @@
 
 <div id="modal">
   <div class="sheet">
-  <div class="head">
-  <h2 id="modal-title">Nearby beacons</h2>
-  <button class="secondary" id="close">Close</button>
-  </div>
-  <div class="body" id="modal-body"></div>
+    <div class="head">
+      <h2 id="modal-title">Nearby beacons</h2>
+      <button class="secondary" id="close">Close</button>
+    </div>
+    <div class="body" id="modal-body"></div>
   </div>
 </div>
 
@@ -86,7 +86,7 @@
 // ---- config knobs -----------------------------------------------------------
 // Venue fallback center (used only if GPS is unavailable). Tune to your building.
 const DEFAULT_CENTER = [37.48412, -122.14993];
-const THUMB_DELTA = 0.0016;  // thumbnail bbox half-span in degrees (~zoom level)
+const THUMB_DELTA = 0.0016;          // thumbnail bbox half-span in degrees (~zoom level)
 const EDDYSTONE_SVC = '0000feaa-0000-1000-8000-00805f9b34fb';
 const STORE_KEY = 'beacon_mapper_v1';
 const IMG = (minLng,minLat,maxLng,maxLat) =>
@@ -96,8 +96,8 @@ const ESRI_TILES = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_I
 
 // ---- state ------------------------------------------------------------------
 let beacons = load();
-let currentScan = null;  // active BluetoothLEScan
-let discovered = new Map();  // uid -> rssi (this scan session)
+let currentScan = null;      // active BluetoothLEScan
+let discovered = new Map();  // uid -> {rssi, kind} (this scan session)
 let scanRenderPending = false;
 let editMap = null, editMarker = null, pending = null; // pending = {uid, lat, lng, alt}
 
@@ -107,13 +107,50 @@ function save() { localStorage.setItem(STORE_KEY, JSON.stringify(beacons)); }
 // ---- Eddystone-UID parsing (the only typo-critical bit) ---------------------
 function parseEddystoneUid(dv) {
   if (!dv || dv.byteLength < 18) return null;
-  if (dv.getUint8(0) !== 0x00) return null;  // frame type 0x00 = UID
+  if (dv.getUint8(0) !== 0x00) return null;            // frame type 0x00 = UID
   const hex = (start, len) => {
-  let s = '';
-  for (let i = 0; i < len; i++) s += dv.getUint8(start + i).toString(16).padStart(2, '0');
-  return s;
+    let s = '';
+    for (let i = 0; i < len; i++) s += dv.getUint8(start + i).toString(16).padStart(2, '0');
+    return s;
   };
   return `eddystone-uid:${hex(2, 10)}:${hex(12, 6)}`;   // 10-byte namespace : 6-byte instance
+}
+
+// ---- advert classification (any beacon format, never silently drop) ---------
+function hex8(dv, start, len) {
+  let s = ''; for (let i = 0; i < len; i++) s += dv.getUint8(start + i).toString(16).padStart(2, '0'); return s;
+}
+function parseEddystoneUrl(dv) {
+  if (dv.byteLength < 3) return null;
+  const scheme = ['http://www.', 'https://www.', 'http://', 'https://'][dv.getUint8(2)] ?? '';
+  const suffix = ['.com/', '.org/', '.edu/', '.net/', '.info/', '.biz/', '.gov/', '.com', '.org', '.edu', '.net', '.info', '.biz', '.gov'];
+  let url = scheme;
+  for (let i = 3; i < dv.byteLength; i++) { const b = dv.getUint8(i); url += b < suffix.length ? suffix[b] : String.fromCharCode(b); }
+  return url;
+}
+// Returns {uid, kind} for anything with a stable identifier; null only for pure telemetry.
+function describeAdvert(event) {
+  const eddy = event.serviceData && event.serviceData.get(EDDYSTONE_SVC);
+  if (eddy && eddy.byteLength) {
+    const t = eddy.getUint8(0);
+    if (t === 0x00) { const u = parseEddystoneUid(eddy); if (u) return { uid: u, kind: 'Eddystone-UID' }; }
+    if (t === 0x10) { const url = parseEddystoneUrl(eddy); if (url) return { uid: `eddystone-url:${url}`, kind: 'Eddystone-URL' }; }
+    if (t === 0x30 && eddy.byteLength >= 10) return { uid: `eddystone-eid:${hex8(eddy, 2, 8)}`, kind: 'Eddystone-EID' };
+    if (t !== 0x20) return { uid: `feaa:${hex8(eddy, 0, eddy.byteLength)}`, kind: 'Eddystone-?' }; // 0x20 = TLM, no stable id
+  }
+  const apple = event.manufacturerData && event.manufacturerData.get(0x004c);
+  if (apple && apple.byteLength >= 23 && apple.getUint8(0) === 0x02 && apple.getUint8(1) === 0x15) {
+    const h = hex8(apple, 2, 16);
+    const uuid = `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
+    return { uid: `ibeacon:${uuid}:${apple.getUint16(18, false)}:${apple.getUint16(20, false)}`, kind: 'iBeacon' };
+  }
+  // ponytail: raw fallback so nothing is ever dropped. Keys on name/first service/mfr blob — good enough
+  // to geotag a physical unit; swap to the real parser once we confirm the format on screen.
+  const name = event.name || (event.device && event.device.name);
+  if (name) return { uid: `name:${name}`, kind: 'named' };
+  if (event.serviceData) for (const [u, dv] of event.serviceData) return { uid: `svc:${u.slice(4,8)}:${hex8(dv,0,Math.min(dv.byteLength,6))}`, kind: `svc ${u.slice(4,8)}` };
+  if (event.manufacturerData) for (const [c, dv] of event.manufacturerData) return { uid: `mfr:${c.toString(16).padStart(4,'0')}:${hex8(dv,0,Math.min(dv.byteLength,6))}`, kind: `mfr ${c.toString(16).padStart(4,'0')}` };
+  return null;
 }
 
 // ---- list rendering ---------------------------------------------------------
@@ -125,25 +162,25 @@ function renderList() {
   document.getElementById('count').textContent = `${beacons.length} beacon${beacons.length === 1 ? '' : 's'}`;
   const list = document.getElementById('list');
   if (!beacons.length) {
-  list.innerHTML = '<div class="empty-state">No beacons yet.<br>Tap <b>+ Add beacon</b> to scan one.</div>';
-  return;
+    list.innerHTML = '<div class="empty-state">No beacons yet.<br>Tap <b>+ Add beacon</b> to scan one.</div>';
+    return;
   }
   list.innerHTML = '';
   beacons.forEach((b, i) => {
-  const card = document.createElement('div');
-  card.className = 'card';
-  card.innerHTML = `
-  <div class="thumb" style="background-image:url('${thumbUrl(b.lat, b.lng)}')"><div class="pin">📍</div></div>
-  <div class="meta">
-  <div class="name ${b.name ? '' : 'empty'}">${b.name ? esc(b.name) : '(no name)'}</div>
-  <div class="uid">${esc(b.uid)}</div>
-  <div class="ll">${b.lat.toFixed(6)}, ${b.lng.toFixed(6)} · ${b.alt} m</div>
-  </div>
-  <button class="del" data-i="${i}">✕</button>`;
-  list.appendChild(card);
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `
+      <div class="thumb" style="background-image:url('${thumbUrl(b.lat, b.lng)}')"><div class="pin">📍</div></div>
+      <div class="meta">
+        <div class="name ${b.name ? '' : 'empty'}">${b.name ? esc(b.name) : '(no name)'}</div>
+        <div class="uid">${esc(b.uid)}</div>
+        <div class="ll">${b.lat.toFixed(6)}, ${b.lng.toFixed(6)} · ${b.alt} m</div>
+      </div>
+      <button class="del" data-i="${i}">✕</button>`;
+    list.appendChild(card);
   });
   list.querySelectorAll('.del').forEach(btn => btn.onclick = () => {
-  if (confirm('Remove this beacon?')) { beacons.splice(+btn.dataset.i, 1); save(); renderList(); refreshJson(); }
+    if (confirm('Remove this beacon?')) { beacons.splice(+btn.dataset.i, 1); save(); renderList(); refreshJson(); }
   });
   refreshJson();
 }
@@ -152,24 +189,23 @@ function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&
 // ---- scanning ---------------------------------------------------------------
 async function openAdd() {
   if (!navigator.bluetooth || !navigator.bluetooth.requestLEScan) {
-  document.getElementById('unsupported').style.display = 'block';
-  return;
+    document.getElementById('unsupported').style.display = 'block';
+    return;
   }
   discovered = new Map();
   showModal('Nearby beacons', '<div class="hint">Scanning… tap the beacon you\'re standing next to (strongest signal is at the top).</div><div id="scanlist"></div>');
   navigator.bluetooth.addEventListener('advertisementreceived', onAdvert);
   try {
-  currentScan = await navigator.bluetooth.requestLEScan({ acceptAllAdvertisements: true, keepRepeatedDevices: true });
+    currentScan = await navigator.bluetooth.requestLEScan({ acceptAllAdvertisements: true, keepRepeatedDevices: true });
   } catch (e) {
-  document.getElementById('modal-body').innerHTML =
-  `<div class="banner">Scan failed: ${esc(e.message)}<br>Check the chrome://flags setting and Bluetooth permission.</div>`;
+    document.getElementById('modal-body').innerHTML =
+      `<div class="banner">Scan failed: ${esc(e.message)}<br>Check the chrome://flags setting and Bluetooth permission.</div>`;
   }
 }
 function onAdvert(event) {
-  const dv = event.serviceData && event.serviceData.get(EDDYSTONE_SVC);
-  const uid = parseEddystoneUid(dv);
-  if (!uid) return;
-  discovered.set(uid, event.rssi);
+  const d = describeAdvert(event);
+  if (!d) return;
+  discovered.set(d.uid, { rssi: event.rssi, kind: d.kind });
   if (!scanRenderPending) { scanRenderPending = true; setTimeout(renderScanList, 400); }
 }
 function renderScanList() {
@@ -177,14 +213,14 @@ function renderScanList() {
   const el = document.getElementById('scanlist');
   if (!el) return;
   const have = new Set(beacons.map(b => b.uid));
-  const rows = [...discovered.entries()].filter(([uid]) => !have.has(uid)).sort((a, b) => b[1] - a[1]);
+  const rows = [...discovered.entries()].filter(([uid]) => !have.has(uid)).sort((a, b) => b[1].rssi - a[1].rssi);
   el.innerHTML = rows.length ? '' : '<div class="hint">No new beacons in range yet…</div>';
-  rows.forEach(([uid, rssi]) => {
-  const row = document.createElement('div');
-  row.className = 'scan-row';
-  row.innerHTML = `<span class="bars">${signalBars(rssi)}</span><span class="id">${esc(uid)}</span><span class="sig">${rssi} dBm</span>`;
-  row.onclick = () => selectBeacon(uid);
-  el.appendChild(row);
+  rows.forEach(([uid, info]) => {
+    const row = document.createElement('div');
+    row.className = 'scan-row';
+    row.innerHTML = `<span class="bars">${signalBars(info.rssi)}</span><span class="id"><b>${esc(info.kind)}</b><br>${esc(uid)}</span><span class="sig">${info.rssi} dBm</span>`;
+    row.onclick = () => selectBeacon(uid);
+    el.appendChild(row);
   });
 }
 function signalBars(rssi) { const n = rssi > -55 ? 4 : rssi > -67 ? 3 : rssi > -80 ? 2 : 1; return '▮'.repeat(n) + '▯'.repeat(4 - n); }
@@ -198,26 +234,26 @@ function selectBeacon(uid) {
   stopScan();
   pending = { uid, lat: DEFAULT_CENTER[0], lng: DEFAULT_CENTER[1], alt: 0 };
   showModal('Set location', `
-  <div class="hint" style="margin-bottom:8px">Drag the pin (or tap the map) to where the beacon is. Override GPS if it's off.</div>
-  <div id="editmap"></div>
-  <div class="row2">
-  <div class="field"><label>Name (optional)</label><input id="f-name" placeholder="e.g. Hall A / booth 17"></div>
-  <div class="field" style="flex:0 0 90px"><label>Alt (m)</label><input id="f-alt" type="number" value="0"></div>
-  </div>
-  <button id="do-add" style="width:100%">Add beacon</button>`);
+    <div class="hint" style="margin-bottom:8px">Drag the pin (or tap the map) to where the beacon is. Override GPS if it's off.</div>
+    <div id="editmap"></div>
+    <div class="row2">
+      <div class="field"><label>Name (optional)</label><input id="f-name" placeholder="e.g. Hall A / booth 17"></div>
+      <div class="field" style="flex:0 0 90px"><label>Alt (m)</label><input id="f-alt" type="number" value="0"></div>
+    </div>
+    <button id="do-add" style="width:100%">Add beacon</button>`);
   editMap = L.map('editmap');
   L.tileLayer(ESRI_TILES, { maxNativeZoom: 19, maxZoom: 21, attribution: 'Esri' }).addTo(editMap);
   const setView = (lat, lng, z) => {
-  pending.lat = lat; pending.lng = lng;
-  editMap.setView([lat, lng], z);
-  editMarker = L.marker([lat, lng], { draggable: true }).addTo(editMap);
-  editMarker.on('dragend', () => { const p = editMarker.getLatLng(); pending.lat = p.lat; pending.lng = p.lng; });
-  editMap.on('click', e => { editMarker.setLatLng(e.latlng); pending.lat = e.latlng.lat; pending.lng = e.latlng.lng; });
+    pending.lat = lat; pending.lng = lng;
+    editMap.setView([lat, lng], z);
+    editMarker = L.marker([lat, lng], { draggable: true }).addTo(editMap);
+    editMarker.on('dragend', () => { const p = editMarker.getLatLng(); pending.lat = p.lat; pending.lng = p.lng; });
+    editMap.on('click', e => { editMarker.setLatLng(e.latlng); pending.lat = e.latlng.lat; pending.lng = e.latlng.lng; });
   };
   navigator.geolocation.getCurrentPosition(
-  pos => { if (pos.coords.altitude != null) document.getElementById('f-alt').value = Math.round(pos.coords.altitude); setView(pos.coords.latitude, pos.coords.longitude, 20); },
-  () => setView(DEFAULT_CENTER[0], DEFAULT_CENTER[1], 18),
-  { enableHighAccuracy: true, timeout: 4000 });
+    pos => { if (pos.coords.altitude != null) document.getElementById('f-alt').value = Math.round(pos.coords.altitude); setView(pos.coords.latitude, pos.coords.longitude, 20); },
+    () => setView(DEFAULT_CENTER[0], DEFAULT_CENTER[1], 18),
+    { enableHighAccuracy: true, timeout: 4000 });
   document.getElementById('do-add').onclick = confirmAdd;
 }
 function confirmAdd() {
@@ -261,11 +297,22 @@ document.getElementById('show-json').onclick = () => {
 
 // ---- self-check: parser must reproduce the known screenshot beacon ----------
 (function selfCheck() {
-  const bytes = [0x00, 0x00, 0xe5,0xa4,0xa7,0xe5,0xa4,0x8f,0x31,0x32,0x33,0x34, 0x44,0x58,0x4c,0x29,0x19,0x1a];
-  const dv = new DataView(new Uint8Array(bytes).buffer);
-  const got = parseEddystoneUid(dv);
-  console.assert(got === 'eddystone-uid:e5a4a7e5a48f31323334:44584c29191a', 'parser self-check FAILED:', got);
-  console.log('beacon-mapper self-check', got === 'eddystone-uid:e5a4a7e5a48f31323334:44584c29191a' ? 'ok' : 'FAILED');
+  const dvOf = a => new DataView(new Uint8Array(a).buffer);
+  const cases = [];
+  // Eddystone-UID via serviceData
+  cases.push([{ serviceData: new Map([[EDDYSTONE_SVC, dvOf([0x00,0x00,0xe5,0xa4,0xa7,0xe5,0xa4,0x8f,0x31,0x32,0x33,0x34,0x44,0x58,0x4c,0x29,0x19,0x1a])]]) },
+    'eddystone-uid:e5a4a7e5a48f31323334:44584c29191a', 'Eddystone-UID']);
+  // iBeacon via Apple manufacturer data: 02 15 | uuid(16) | major(2 BE) | minor(2 BE) | tx
+  cases.push([{ manufacturerData: new Map([[0x004c, dvOf([0x02,0x15,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,0,1,0,2,0xc5])]]) },
+    'ibeacon:01020304-0506-0708-090a-0b0c0d0e0f10:1:2', 'iBeacon']);
+  // raw fallback: named device with no beacon frame
+  cases.push([{ name: 'WB1267948' }, 'name:WB1267948', 'named']);
+  let ok = true;
+  for (const [ev, uid, kind] of cases) {
+    const d = describeAdvert(ev);
+    if (!d || d.uid !== uid || d.kind !== kind) { ok = false; console.assert(false, 'self-check FAILED:', uid, '->', d); }
+  }
+  console.log('beacon-mapper self-check', ok ? 'ok' : 'FAILED');
 })();
 
 renderList();
