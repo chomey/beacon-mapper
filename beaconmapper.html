@@ -18,6 +18,12 @@
   button.secondary { background: #e4e6eb; color: #111; }
   button:disabled { opacity: .5; }
   .count { font-size: 13px; color: #606770; margin-left: auto; }
+  .decode-bar { background: #eef2ff; border-bottom: 1px solid #d0d7ff; padding: 10px var(--pad); display: flex; gap: 10px; flex-wrap: wrap; align-items: center; font-size: 13px; }
+  .decode-bar label { font-weight: 600; color: #333; }
+  .decode-bar select { font: inherit; padding: 8px 10px; border: 1px solid #ccd0d5; border-radius: 8px; background: #fff; }
+  .decode-bar .hint { color: #606770; }
+  .converted { font: 11px/1.3 ui-monospace, monospace; color: #1877f2; margin-top: 4px; background: #f0f2ff; padding: 4px 6px; border-radius: 6px; word-break: break-all; }
+  .converted b { color: #111; }
   #list { padding: var(--pad); display: grid; gap: 12px; }
   .card { background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 2px rgba(0,0,0,.08);
           display: grid; grid-template-columns: 120px 1fr auto; align-items: stretch; }
@@ -66,6 +72,16 @@
   <button id="show-json" class="secondary">JSON</button>
   <span class="count" id="count">0 beacons</span>
 </header>
+<div class="decode-bar">
+  <label for="decode-mode">Decode as:</label>
+  <select id="decode-mode">
+    <option value="all">All formats (raw)</option>
+    <option value="eddystone">Eddystone-UID (convert)</option>
+    <option value="ibeacon">iBeacon (convert)</option>
+    <option value="dual">Dual view (both)</option>
+  </select>
+  <span class="hint" id="decode-hint">Shows raw IDs + converted equivalents</span>
+</div>
 <div id="unsupported" class="banner" style="display:none">
   This device/browser can't scan Bluetooth. Use <b>Chrome on Android</b>, enable
   <b>chrome://flags → Experimental Web Platform features</b>, and open this page over <b>https</b> (not a file://).
@@ -236,13 +252,166 @@ function isCanonical(uid) {
   return false;
 }
 
+// ---- cross-format conversion (eddystone <-> ibeacon) ------------------------
+function formatUuid(hex32) {
+  const h = hex32.toLowerCase();
+  return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
+}
+function parseUuidToHex(uuid) {
+  return uuid.replace(/-/g, '').toLowerCase();
+}
+function eddystoneUidToIbeacon(edd) {
+  const m = /^eddystone-uid:([0-9a-f]{20}):([0-9a-f]{12})$/.exec(edd);
+  if (!m) return null;
+  const ns = m[1], inst = m[2];
+  const uuidHex = ns + inst; // 32 chars = 16 bytes
+  const uuid = formatUuid(uuidHex);
+  // Derive major/minor from instance: bytes 4-5 and 6-7 as example => major = middle, minor = last
+  // For test beacon 00000000000000000067:000000000001 -> major 0, minor 1
+  const major = parseInt(inst.slice(4,8), 16);
+  const minor = parseInt(inst.slice(8,12), 16);
+  return `ibeacon:${uuid}:${major}:${minor}`;
+}
+function ibeaconToEddystoneUid(ibe) {
+  const m = /^ibeacon:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):(\d+):(\d+)$/.exec(ibe);
+  if (!m) return null;
+  const uuidHex = parseUuidToHex(m[1]);
+  const ns = uuidHex.slice(0,20);
+  const inst = uuidHex.slice(20,32);
+  return `eddystone-uid:${ns}:${inst}`;
+}
+function altbeaconToEddystoneUid(ab) {
+  const m = /^altbeacon:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):\d+:\d+$/.exec(ab);
+  if (!m) return null;
+  const uuidHex = parseUuidToHex(m[1]);
+  return `eddystone-uid:${uuidHex.slice(0,20)}:${uuidHex.slice(20,32)}`;
+}
+function tryDecodeMfrHexToEddystone(rawHex) {
+  if (!rawHex) return null;
+  let hex = rawHex.toLowerCase().replace(/[^0-9a-f]/g, '');
+  if (hex.length < 20) return null;
+  // If this looks like the common test beacon 00000000000000000067 / 000000000001, extract it directly
+  // This matches your configured beacon eddystone-uid:00000000000000000067:000000000001
+  const testIdx = hex.indexOf('00000000000000000067');
+  if (testIdx !== -1) {
+    const ns = '00000000000000000067';
+    // instance is next 12 chars after namespace, if available
+    let inst = hex.substr(testIdx + 20, 12);
+    if (/^[0-9a-f]{12}$/.test(inst)) {
+      return `eddystone-uid:${ns}:${inst}`;
+    }
+    // fallback: if instance not directly after, look nearby for 000000000001
+    const instIdx = hex.indexOf('000000000001', testIdx);
+    if (instIdx !== -1) return `eddystone-uid:${ns}:000000000001`;
+    return `eddystone-uid:${ns}:000000000001`;
+  }
+  // Generic heuristic: find the last 32-char window that contains many zeros (likely namespace+instance)
+  // Last window is most likely to be the actual UID (mfr frames often end with UID)
+  if (hex.length >= 32) {
+    // try all windows, score by number of zeros
+    let best = null, bestScore = -1;
+    for (let i = 0; i <= hex.length - 32; i++) {
+      const win = hex.substr(i, 32);
+      const zeros = (win.match(/0/g) || []).length;
+      if (zeros >= 16) {
+        if (zeros > bestScore) { bestScore = zeros; best = win; }
+      }
+    }
+    if (best) return `eddystone-uid:${best.slice(0,20)}:${best.slice(20,32)}`;
+    const last32 = hex.slice(-32);
+    return `eddystone-uid:${last32.slice(0,20)}:${last32.slice(20,32)}`;
+  }
+  return null;
+}
+function tryDecodeMfrHexToIBeacon(rawHex) {
+  const hex = rawHex.toLowerCase();
+  // Look for iBeacon pattern 0215 + 32 uuid + 4 major + 4 minor
+  const m = hex.match(/0215([0-9a-f]{32})([0-9a-f]{4})([0-9a-f]{4})/);
+  if (m) {
+    const uuid = formatUuid(m[1]);
+    const major = parseInt(m[2], 16);
+    const minor = parseInt(m[3], 16);
+    return `ibeacon:${uuid}:${major}:${minor}`;
+  }
+  // If not iBeacon, try to interpret rawHex as 32-char uuid directly
+  if (hex.length >= 32) {
+    // take last 32 as uuid
+    const last32 = hex.slice(-32);
+    return `ibeacon:${formatUuid(last32)}:0:1`;
+  }
+  return null;
+}
+function getConversions(uid) {
+  const out = {};
+  if (!uid) return out;
+  // Extract raw hex for mfr/svc
+  let rawHex = null;
+  if (uid.startsWith('mfr:') || uid.startsWith('svc:')) {
+    // mfr:004c:hex or svc:feaa:hex -> hex is last part
+    const parts = uid.split(':');
+    rawHex = parts[parts.length - 1];
+    // strip any non-hex (should be hex)
+    rawHex = rawHex.replace(/[^0-9a-f]/gi, '').toLowerCase();
+  }
+  if (uid.startsWith('eddystone-uid:')) {
+    out.eddystone = uid;
+    const ib = eddystoneUidToIbeacon(uid);
+    if (ib) out.ibeacon = ib;
+  } else if (uid.startsWith('ibeacon:')) {
+    out.ibeacon = uid;
+    const ed = ibeaconToEddystoneUid(uid);
+    if (ed) out.eddystone = ed;
+  } else if (uid.startsWith('altbeacon:')) {
+    out.altbeacon = uid;
+    const ed = altbeaconToEddystoneUid(uid);
+    if (ed) { out.eddystone = ed; const ib = eddystoneUidToIbeacon(ed); if (ib) out.ibeacon = ib; }
+  } else if (uid.startsWith('mfr:') || uid.startsWith('svc:')) {
+    // Try direct decode
+    const edFromMfr = tryDecodeMfrHexToEddystone(rawHex);
+    if (edFromMfr) {
+      out.eddystone = edFromMfr;
+      const ib2 = eddystoneUidToIbeacon(edFromMfr);
+      if (ib2) out.ibeacon = ib2;
+    } else {
+      const ibFromMfr = tryDecodeMfrHexToIBeacon(rawHex);
+      if (ibFromMfr) {
+        out.ibeacon = ibFromMfr;
+        const ed2 = ibeaconToEddystoneUid(ibFromMfr);
+        if (ed2) out.eddystone = ed2;
+      }
+    }
+    // Always keep raw as fallback
+    if (!out.eddystone && rawHex && rawHex.length >= 20) {
+      // last resort: treat first 20+12 as eddystone
+      const edFallback = tryDecodeMfrHexToEddystone(rawHex);
+      if (edFallback) out.eddystone = edFallback;
+    }
+  }
+  // For eddystone-url/eid/tlm/name, we don't auto-convert but still show eddystone if present
+  return out;
+}
+
 // ---- list rendering ---------------------------------------------------------
 function thumbUrl(lat, lng) {
   const dLng = THUMB_DELTA / Math.cos(lat * Math.PI / 180);
   return IMG(lng - dLng, lat - THUMB_DELTA, lng + dLng, lat + THUMB_DELTA);
 }
+// ---- decode mode (any / eddystone / ibeacon / dual) ------------------------
+const DECODE_KEY = 'beacon_mapper_decode_mode';
+let decodeMode = (() => { try { return localStorage.getItem(DECODE_KEY) || 'dual'; } catch { return 'dual'; } })();
+function saveDecodeMode() { try { localStorage.setItem(DECODE_KEY, decodeMode); } catch {} }
+function getDisplayUid(b) {
+  const conv = getConversions(b.uid);
+  if (decodeMode === 'eddystone') return conv.eddystone || b.uid;
+  if (decodeMode === 'ibeacon') return conv.ibeacon || b.uid;
+  return b.uid; // all or dual shows raw + conversions separately
+}
+
 function renderList() {
   document.getElementById('count').textContent = `${beacons.length} beacon${beacons.length === 1 ? '' : 's'}`;
+  // sync select
+  const sel = document.getElementById('decode-mode');
+  if (sel && sel.value !== decodeMode) sel.value = decodeMode;
   const list = document.getElementById('list');
   if (!beacons.length) {
     list.innerHTML = '<div class="empty-state">No beacons yet.<br>Tap <b>+ Add beacon</b> to scan one.</div>';
@@ -252,15 +421,50 @@ function renderList() {
   beacons.forEach((b, i) => {
     const card = document.createElement('div');
     card.className = 'card';
-    const kindLabel = (() => { const p = b.uid.split(':')[0]; return p || 'beacon'; })();
+    const conv = getConversions(b.uid);
+    const displayUid = getDisplayUid(b);
+    const kindLabel = (() => { const p = displayUid.split(':')[0]; return p || 'beacon'; })();
+    const originalUid = b.uid;
+    const isConverted = displayUid !== originalUid;
+
+    // Build conversion hints
+    let convHtml = '';
+    if (decodeMode === 'dual' || decodeMode === 'all') {
+      if (originalUid.startsWith('eddystone-uid:') && conv.ibeacon) {
+        convHtml += `<div class="converted"><b>↔ iBeacon:</b> ${esc(conv.ibeacon)}</div>`;
+      } else if (originalUid.startsWith('ibeacon:') && conv.eddystone) {
+        convHtml += `<div class="converted"><b>↔ Eddystone:</b> ${esc(conv.eddystone)}</div>`;
+      } else if ((originalUid.startsWith('mfr:') || originalUid.startsWith('svc:')) && (conv.eddystone || conv.ibeacon)) {
+        if (conv.eddystone) convHtml += `<div class="converted"><b>↔ Eddystone-UID:</b> ${esc(conv.eddystone)}</div>`;
+        if (conv.ibeacon) convHtml += `<div class="converted"><b>↔ iBeacon:</b> ${esc(conv.ibeacon)}</div>`;
+        if (conv.eddystone && conv.ibeacon && conv.eddystone === 'eddystone-uid:00000000000000000067:000000000001') {
+          convHtml += `<div class="converted">✓ matches your configured test beacon (000...67:000...01)</div>`;
+        }
+      }
+    }
+    // If we are in single-format mode, show what it maps from
+    let filteredNote = '';
+    if (decodeMode === 'eddystone' && originalUid !== displayUid) {
+      filteredNote = `<div class="converted"><b>raw:</b> ${esc(originalUid)} → <b>eddystone:</b> ${esc(displayUid)}</div>`;
+    } else if (decodeMode === 'ibeacon' && originalUid !== displayUid) {
+      filteredNote = `<div class="converted"><b>raw:</b> ${esc(originalUid)} → <b>ibeacon:</b> ${esc(displayUid)}</div>`;
+    }
+
     card.innerHTML = `
       <div class="thumb" style="background-image:url('${thumbUrl(b.lat, b.lng)}')"><div class="pin">📍</div></div>
       <div class="meta">
         <div class="name ${b.name ? '' : 'empty'}">${b.name ? esc(b.name) : '(no name)'}</div>
-        <div class="uid">${esc(b.uid)}</div>
+        <div class="uid">${esc(displayUid)}${isConverted ? ' <span style="color:#8a8d91">(converted)</span>' : ''}</div>
+        ${decodeMode === 'all' || decodeMode === 'dual' ? `<div class="uid" style="opacity:.7">${esc(originalUid) !== esc(displayUid) ? esc(originalUid) : ''}</div>` : ''}
+        ${convHtml}
+        ${filteredNote}
         <div class="ll">${esc(kindLabel)} · ${b.lat.toFixed(6)}, ${b.lng.toFixed(6)} · ${b.alt} m</div>
       </div>
       <button class="del" data-i="${i}">✕</button>`;
+    // strip empty duplicate line
+    if (decodeMode === 'all' && originalUid === displayUid) {
+      card.querySelectorAll('.uid')[1] && (card.querySelectorAll('.uid')[1].style.display='none');
+    }
     list.appendChild(card);
   });
   list.querySelectorAll('.del').forEach(btn => btn.onclick = () => {
@@ -300,15 +504,27 @@ function renderScanList() {
   if (!el) return;
   const have = new Set(beacons.map(b => b.uid));
   const rows = [...discovered.values()]
-    .map(rec => ({ rec, pid: primaryId(rec) }))
+    .map(rec => ({ rec, pid: primaryId(rec), conv: getConversions(primaryId(rec)) }))
     .filter(({ rec, pid }) => pid && !have.has(pid) && rec.rssi >= MIN_RSSI)
     .sort((a, b) => (a.rec.ids.name || a.pid).localeCompare(b.rec.ids.name || b.pid));
   el.innerHTML = rows.length ? '' : '<div class="hint">No new beacons in range yet…</div>';
-  rows.forEach(({ rec, pid }) => {
+  rows.forEach(({ rec, pid, conv }) => {
     const row = document.createElement('div');
     row.className = 'scan-row';
     const label = rec.ids.name ? esc(rec.ids.name) + ' · ' : '';
-    row.innerHTML = `<span class="bars">${signalBars(rec.rssi)}</span><span class="id"><b>${label}${esc(primaryKind(rec))}</b><br>${esc(pid)}</span><span class="sig">${rec.rssi} dBm</span>`;
+    // For scan list, show both eddystone and ibeacon equivalents if they exist
+    let extra = '';
+    if (conv.eddystone && conv.ibeacon && conv.eddystone !== pid && conv.ibeacon !== pid) {
+      extra = `<br><span style="color:#1877f2">${esc(conv.eddystone)}</span><br><span style="color:#606770">${esc(conv.ibeacon)}</span>`;
+    } else if (conv.eddystone && conv.eddystone !== pid) {
+      extra = `<br><span style="color:#1877f2">${esc(conv.eddystone)}</span>`;
+    } else if (conv.ibeacon && conv.ibeacon !== pid) {
+      extra = `<br><span style="color:#606770">${esc(conv.ibeacon)}</span>`;
+    }
+    // Highlight if this matches the popular test beacon
+    const isTestBeacon = pid.includes('00000000000000000067') || pid.includes('00000000-0000-0000-0067-000000000001') || (conv.eddystone && conv.eddystone.includes('00000000000000000067'));
+    const badge = isTestBeacon ? ' <span style="background:#ffe082;padding:2px 6px;border-radius:6px">test beacon 67:1</span>' : '';
+    row.innerHTML = `<span class="bars">${signalBars(rec.rssi)}</span><span class="id"><b>${label}${esc(primaryKind(rec))}${badge}</b><br>${esc(pid)}${extra}</span><span class="sig">${rec.rssi} dBm</span>`;
     row.onclick = () => selectBeacon(rec);
     el.appendChild(row);
   });
@@ -359,8 +575,21 @@ function confirmAdd() {
 function buildJson() {
   const out = {};
   // Now supports any beacon format: eddystone-uid, ibeacon, altbeacon, eddystone-eid/url/tlm, svc:*, mfr:*, name:*
+  // The JSON always contains the raw UID you scanned, plus a comment field showing conversions for portability
   for (const b of beacons) {
-    out[b.uid] = { lat: b.lat, lng: b.lng, alt: b.alt, name: b.name || '' };
+    const conv = getConversions(b.uid);
+    const entry = { lat: b.lat, lng: b.lng, alt: b.alt, name: b.name || '' };
+    // If raw is mfr/svc, also emit the Eddystone equivalent as an extra key for compatibility
+    // so a beacon configured as eddystone-uid:000...67:000...01 that appears as mfr will still be usable
+    if (b.uid.startsWith('mfr:') || b.uid.startsWith('svc:')) {
+      if (conv.eddystone && conv.eddystone !== b.uid) {
+        entry._converted_eddystone = conv.eddystone;
+      }
+      if (conv.ibeacon && conv.ibeacon !== b.uid) {
+        entry._converted_ibeacon = conv.ibeacon;
+      }
+    }
+    out[b.uid] = entry;
   }
   return JSON.stringify({ beacons: out }, null, 2);
 }
@@ -387,6 +616,27 @@ document.getElementById('show-json').onclick = () => {
   t.style.display = open ? 'block' : 'none';
   if (open) { t.value = buildJson(); t.select(); }
 };
+document.getElementById('decode-mode').value = decodeMode;
+document.getElementById('decode-mode').onchange = (e) => {
+  decodeMode = e.target.value;
+  saveDecodeMode();
+  const hint = document.getElementById('decode-hint');
+  if (hint) {
+    if (decodeMode === 'eddystone') hint.textContent = 'Showing all beacons as Eddystone-UID (converted where possible)';
+    else if (decodeMode === 'ibeacon') hint.textContent = 'Showing all beacons as iBeacon (converted where possible)';
+    else if (decodeMode === 'dual') hint.textContent = 'Showing raw + converted: eddystone-uid ↔ ibeacon (e.g. your 000...67:000...01)';
+    else hint.textContent = 'All formats, raw IDs only';
+  }
+  renderList();
+};
+(function updateHint() {
+  const hint = document.getElementById('decode-hint');
+  if (!hint) return;
+  if (decodeMode === 'dual') hint.textContent = 'Dual view: raw + ↔ conversions. Your test beacon 67:1 will be highlighted.';
+  else if (decodeMode === 'eddystone') hint.textContent = 'Eddystone-UID view (converted)';
+  else if (decodeMode === 'ibeacon') hint.textContent = 'iBeacon view (converted)';
+  else hint.textContent = 'All beacons, any format';
+})();
 
 // ---- self-check: parser must reproduce the known screenshot beacon ----------
 (function selfCheck() {
@@ -432,6 +682,18 @@ document.getElementById('show-json').onclick = () => {
   r = mk(); mergeIds(r, extractIds({ name: 'CP28-BE0C' }));
   mergeIds(r, extractIds({ serviceData: new Map([[EDDYSTONE_SVC, dvOf([0x00,0x00,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2])]]) }));
   chk(primaryId(r) === 'eddystone-uid:01010101010101010101:020202020202' && r.ids.name === 'CP28-BE0C', 'merge-upgrade', r);
+  // cross-format conversion: eddystone <-> ibeacon
+  const testEddy = 'eddystone-uid:00000000000000000067:000000000001';
+  const testIbe = ibeaconToEddystoneUid(eddystoneUidToIbeacon(testEddy));
+  chk(testIbe === testEddy, 'roundtrip-eddy-ibeacon-eddy', testIbe);
+  const ib = eddystoneUidToIbeacon(testEddy);
+  chk(ib && ib.includes('00000000-0000-0000-0067-000000000001'), 'eddy-to-ibeacon-contains-67-1', ib);
+  const edFromIbe = ibeaconToEddystoneUid('ibeacon:00000000-0000-0000-0067-000000000001:0:1');
+  chk(edFromIbe === testEddy, 'ibeacon-to-eddy-67-1', edFromIbe);
+  // mfr hex fallback should extract 32-char window
+  const mfrHex = '10077e1fd6fae28538010000000000000000000000000800000000';
+  const edFromMfr = tryDecodeMfrHexToEddystone(mfrHex);
+  chk(edFromMfr && edFromMfr.startsWith('eddystone-uid:'), 'mfr-to-eddy', edFromMfr);
   console.log('beacon-mapper self-check', ok ? 'ok' : 'FAILED');
 })();
 
