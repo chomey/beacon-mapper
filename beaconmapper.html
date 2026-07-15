@@ -80,6 +80,12 @@
     <option value="ibeacon">iBeacon (convert)</option>
     <option value="dual">Dual view (both)</option>
   </select>
+  <label for="sort-mode" style="margin-left:12px">Sort by:</label>
+  <select id="sort-mode">
+    <option value="id">ID (stable α)</option>
+    <option value="rssi">Signal (strongest first)</option>
+    <option value="first">First seen</option>
+  </select>
   <span class="hint" id="decode-hint">Shows raw IDs + converted equivalents</span>
 </div>
 <div id="unsupported" class="banner" style="display:none">
@@ -409,13 +415,16 @@ function thumbUrl(lat, lng) {
 }
 // ---- decode mode (any / eddystone / ibeacon / dual) ------------------------
 const DECODE_KEY = 'beacon_mapper_decode_mode';
+const SORT_KEY = 'beacon_mapper_sort_mode';
 let decodeMode = (() => { try { return localStorage.getItem(DECODE_KEY) || 'dual'; } catch { return 'dual'; } })();
+let sortMode = (() => { try { return localStorage.getItem(SORT_KEY) || 'id'; } catch { return 'id'; } })();
 function saveDecodeMode() { try { localStorage.setItem(DECODE_KEY, decodeMode); } catch {} }
+function saveSortMode() { try { localStorage.setItem(SORT_KEY, sortMode); } catch {} }
 function getDisplayUid(b) {
   const conv = getConversions(b.uid);
   if (decodeMode === 'eddystone') return conv.eddystone || b.uid;
   if (decodeMode === 'ibeacon') return conv.ibeacon || b.uid;
-  return b.uid; // all or dual shows raw + conversions separately
+  return b.uid;
 }
 
 function renderList() {
@@ -505,9 +514,12 @@ async function openAdd() {
 }
 function onAdvert(event) {
   const id = (event.device && event.device.id) || 'anon';
-  const rec = discovered.get(id) || { rssi: event.rssi, ids: {}, services: {}, mfr: {} };
+  const existing = discovered.get(id);
+  const rec = existing || { rssi: event.rssi, ids: {}, services: {}, mfr: {}, firstSeen: Date.now(), name: '' };
+  if (!existing) rec.firstSeen = Date.now();
   rec.rssi = event.rssi;
   mergeIds(rec, extractIds(event));
+  if (rec.ids.name && !rec.name) rec.name = rec.ids.name;
   discovered.set(id, rec);
   if (!scanRenderPending) { scanRenderPending = true; setTimeout(renderScanList, 400); }
 }
@@ -516,7 +528,7 @@ function renderScanList() {
   const el = document.getElementById('scanlist');
   if (!el) return;
   const have = new Set(beacons.map(b => b.uid));
-  const rows = [...discovered.values()]
+  let rows = [...discovered.values()]
     .map(rec => {
       const pid = primaryId(rec);
       const conv = getConversions(pid);
@@ -524,9 +536,15 @@ function renderScanList() {
       const isTestRaw = rawJoined.includes('00000000000000000067') || rawJoined.includes('000000000001');
       return { rec, pid, conv, isTestRaw, rawJoined };
     })
-    .filter(({ rec, pid }) => pid && !have.has(pid) && rec.rssi >= MIN_RSSI)
-    // Stable sort by UID only (not name) so rows don't jump when name appears. Then by RSSI for equal UIDs.
-    .sort((a, b) => a.pid.localeCompare(b.pid));
+    .filter(({ rec, pid }) => pid && !have.has(pid) && rec.rssi >= MIN_RSSI);
+
+  if (sortMode === 'rssi') {
+    rows.sort((a, b) => b.rec.rssi - a.rec.rssi); // strongest first, stable for same RSSI by ID
+  } else if (sortMode === 'first') {
+    rows.sort((a, b) => a.rec.firstSeen - b.rec.firstSeen);
+  } else {
+    rows.sort((a, b) => a.pid.localeCompare(b.pid));
+  }
   el.innerHTML = rows.length ? '' : '<div class="hint">No new beacons in range yet… Is your BCPro_211665 advertising? Check that SLOT0 is Enabled, Uploaded, and contains 00000000000000000067:000000000001. Also make sure the vendor app is not still connected (close it).</div>';
 
   const testBeacons = rows.filter(r => r.pid.includes('00000000000000000067') || (r.conv.eddystone && r.conv.eddystone.includes('00000000000000000067')) || r.isTestRaw);
@@ -676,13 +694,24 @@ document.getElementById('decode-mode').onchange = (e) => {
   }
   renderList();
 };
+document.getElementById('sort-mode').value = sortMode;
+document.getElementById('sort-mode').onchange = (e) => {
+  sortMode = e.target.value;
+  saveSortMode();
+  renderList();
+  // if modal open, re-render scan list too
+  const modal = document.getElementById('modal');
+  if (modal && modal.classList.contains('open')) {
+    renderScanList();
+  }
+};
 (function updateHint() {
   const hint = document.getElementById('decode-hint');
   if (!hint) return;
-  if (decodeMode === 'dual') hint.textContent = 'Dual view: raw + ↔ conversions. Your test beacon 67:1 will be highlighted.';
-  else if (decodeMode === 'eddystone') hint.textContent = 'Eddystone-UID view (converted)';
-  else if (decodeMode === 'ibeacon') hint.textContent = 'iBeacon view (converted)';
-  else hint.textContent = 'All beacons, any format';
+  if (decodeMode === 'dual') hint.textContent = 'Dual view: raw + ↔ conversions. Your test beacon 67:1 will be highlighted. Sort is now stable by ID.';
+  else if (decodeMode === 'eddystone') hint.textContent = 'Eddystone-UID view (converted). Sorted stable.';
+  else if (decodeMode === 'ibeacon') hint.textContent = 'iBeacon view (converted). Sorted stable.';
+  else hint.textContent = 'All beacons, any format. Sorted by ID.';
 })();
 
 // ---- self-check: parser must reproduce the known screenshot beacon ----------
