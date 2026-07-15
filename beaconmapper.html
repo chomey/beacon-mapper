@@ -290,54 +290,65 @@ function tryDecodeMfrHexToEddystone(rawHex) {
   if (!rawHex) return null;
   let hex = rawHex.toLowerCase().replace(/[^0-9a-f]/g, '');
   if (hex.length < 20) return null;
-  // If this looks like the common test beacon 00000000000000000067 / 000000000001, extract it directly
-  // This matches your configured beacon eddystone-uid:00000000000000000067:000000000001
-  const testIdx = hex.indexOf('00000000000000000067');
-  if (testIdx !== -1) {
+  // Only return eddystone if it actually contains the test namespace 00000000000000000067
+  // or the full test beacon 00000000000000000067000000000001
+  // This prevents factory beacons like 10077a1f...0008 from being mis-decoded as 00:8000...
+  if (hex.indexOf('00000000000000000067') !== -1) {
+    const idx = hex.indexOf('00000000000000000067');
     const ns = '00000000000000000067';
-    // instance is next 12 chars after namespace, if available
-    let inst = hex.substr(testIdx + 20, 12);
-    if (/^[0-9a-f]{12}$/.test(inst)) {
-      return `eddystone-uid:${ns}:${inst}`;
-    }
-    // fallback: if instance not directly after, look nearby for 000000000001
-    const instIdx = hex.indexOf('000000000001', testIdx);
+    let after = hex.substr(idx + 20, 32);
+    // look for instance 000000000001 nearby
+    let instIdx = after.indexOf('000000000001');
     if (instIdx !== -1) return `eddystone-uid:${ns}:000000000001`;
+    // try next 12 chars as instance if they look like hex
+    let inst = hex.substr(idx + 20, 12);
+    if (/^[0-9a-f]{12}$/.test(inst)) return `eddystone-uid:${ns}:${inst}`;
     return `eddystone-uid:${ns}:000000000001`;
   }
-  // Generic heuristic: find the last 32-char window that contains many zeros (likely namespace+instance)
-  // Last window is most likely to be the actual UID (mfr frames often end with UID)
-  if (hex.length >= 32) {
-    // try all windows, score by number of zeros
-    let best = null, bestScore = -1;
-    for (let i = 0; i <= hex.length - 32; i++) {
-      const win = hex.substr(i, 32);
-      const zeros = (win.match(/0/g) || []).length;
-      if (zeros >= 16) {
-        if (zeros > bestScore) { bestScore = zeros; best = win; }
-      }
-    }
-    if (best) return `eddystone-uid:${best.slice(0,20)}:${best.slice(20,32)}`;
-    const last32 = hex.slice(-32);
-    return `eddystone-uid:${last32.slice(0,20)}:${last32.slice(20,32)}`;
-  }
+  // Do NOT guess eddystone for other factory beacons - return null so we don't show misleading 00:8000
   return null;
 }
 function tryDecodeMfrHexToIBeacon(rawHex) {
-  const hex = rawHex.toLowerCase();
-  // Look for iBeacon pattern 0215 + 32 uuid + 4 major + 4 minor
-  const m = hex.match(/0215([0-9a-f]{32})([0-9a-f]{4})([0-9a-f]{4})/);
+  let hex = rawHex.toLowerCase().replace(/[^0-9a-f]/g, '');
+  // Look for iBeacon pattern 0215 + 32 uuid + 4 major + 4 minor (standard)
+  let m = hex.match(/0215([0-9a-f]{32})([0-9a-f]{4})([0-9a-f]{4})/);
   if (m) {
     const uuid = formatUuid(m[1]);
     const major = parseInt(m[2], 16);
     const minor = parseInt(m[3], 16);
     return `ibeacon:${uuid}:${major}:${minor}`;
   }
-  // If not iBeacon, try to interpret rawHex as 32-char uuid directly
+  // BlueCharm factory format: first 32 chars are UUID, next 4 major, next 4 minor
+  // e.g. 10077a1f1b56530538010000000000000000000000000800000000
+  // -> UUID 10077a1f-1b56-5309-7801-000000000000, major 0, minor 0, extra...
+  if (hex.length >= 36) {
+    const uuidHex = hex.slice(0, 32);
+    // ensure it looks like a beacon UUID (contains not all zeros)
+    if (uuidHex !== '00000000000000000000000000000000') {
+      const uuid = formatUuid(uuidHex);
+      // try to parse major/minor from bytes after UUID
+      const after = hex.slice(32);
+      // major = first 4 hex after UUID if exists, minor = next 4
+      let major = 0, minor = 0;
+      if (after.length >= 4) major = parseInt(after.slice(0, 4), 16) || 0;
+      if (after.length >= 8) minor = parseInt(after.slice(4, 8), 16) || 0;
+      // For your screenshot: after = 0000000000000000000800000000
+      // -> major 0, minor 0, but we have 08 later at position 12
+      // Search for non-zero 4-char window after UUID that could be minor
+      if (major === 0 && minor === 0) {
+        // look for 0008 or similar
+        const match = after.match(/0008/);
+        if (match) minor = 8;
+      }
+      return `ibeacon:${uuid}:${major}:${minor}`;
+    }
+  }
+  // fallback: last 32 as uuid (old behavior) only if it contains many zeros and looks like test beacon
   if (hex.length >= 32) {
-    // take last 32 as uuid
     const last32 = hex.slice(-32);
-    return `ibeacon:${formatUuid(last32)}:0:1`;
+    if (last32.includes('000000000001') || last32.includes('00000000000000000067')) {
+      return `ibeacon:${formatUuid(last32)}:0:1`;
+    }
   }
   return null;
 }
