@@ -417,7 +417,7 @@ function thumbUrl(lat, lng) {
 const DECODE_KEY = 'beacon_mapper_decode_mode';
 const SORT_KEY = 'beacon_mapper_sort_mode';
 let decodeMode = (() => { try { return localStorage.getItem(DECODE_KEY) || 'dual'; } catch { return 'dual'; } })();
-let sortMode = (() => { try { return localStorage.getItem(SORT_KEY) || 'id'; } catch { return 'id'; } })();
+let sortMode = (() => { try { return localStorage.getItem(SORT_KEY) || 'first'; } catch { return 'first'; } })();
 function saveDecodeMode() { try { localStorage.setItem(DECODE_KEY, decodeMode); } catch {} }
 function saveSortMode() { try { localStorage.setItem(SORT_KEY, sortMode); } catch {} }
 function getDisplayUid(b) {
@@ -528,42 +528,66 @@ function renderScanList() {
   const el = document.getElementById('scanlist');
   if (!el) return;
   const have = new Set(beacons.map(b => b.uid));
-  let rows = [...discovered.values()]
+  const allDiscovered = [...discovered.values()];
+  let rows = allDiscovered
     .map(rec => {
-      const pid = primaryId(rec);
+      let pid = primaryId(rec);
+      // If still no ID (empty advert), use a placeholder so it still shows for debugging
+      if (!pid) {
+        const fallback = rec.ids.name ? `name:${rec.ids.name}` : `unknown:${rec.firstSeen}`;
+        pid = fallback;
+      }
       const conv = getConversions(pid);
-      const rawJoined = (Object.values(rec.services).join(' ') + ' ' + Object.values(rec.mfr).join(' ')).toLowerCase();
-      const isTestRaw = rawJoined.includes('00000000000000000067') || rawJoined.includes('000000000001');
+      const rawJoined = (Object.values(rec.services).join(' ') + ' ' + Object.values(rec.mfr).join(' ') + ' ' + Object.values(rec.ids).join(' ')).toLowerCase();
+      const isTestRaw = rawJoined.includes('00000000000000000067') || rawJoined.includes('000000000001') || pid.includes('00000000000000000067');
       return { rec, pid, conv, isTestRaw, rawJoined };
     })
-    .filter(({ rec, pid }) => pid && !have.has(pid) && rec.rssi >= MIN_RSSI);
+    .filter(({ rec, pid }) => {
+      // Don't filter by have for test beacons - always show 67:1 even if saved, so user can see it
+      const isTest = pid.includes('00000000000000000067') || pid.includes('00000000-0000-0000-0067-');
+      if (isTest) return rec.rssi >= MIN_RSSI;
+      return !have.has(pid) && rec.rssi >= MIN_RSSI;
+    });
 
+  // Sort: default is first-seen (stable, no jumping), ID is also stable, RSSI jumps but shows closest first
   if (sortMode === 'rssi') {
-    rows.sort((a, b) => b.rec.rssi - a.rec.rssi); // strongest first, stable for same RSSI by ID
-  } else if (sortMode === 'first') {
-    rows.sort((a, b) => a.rec.firstSeen - b.rec.firstSeen);
-  } else {
+    rows.sort((a, b) => b.rec.rssi - a.rec.rssi || a.pid.localeCompare(b.pid));
+  } else if (sortMode === 'id') {
     rows.sort((a, b) => a.pid.localeCompare(b.pid));
+  } else {
+    rows.sort((a, b) => a.rec.firstSeen - b.rec.firstSeen);
   }
-  el.innerHTML = rows.length ? '' : '<div class="hint">No new beacons in range yet… Is your BCPro_211665 advertising? Check that SLOT0 is Enabled, Uploaded, and contains 00000000000000000067:000000000001. Also make sure the vendor app is not still connected (close it).</div>';
 
-  const testBeacons = rows.filter(r => r.pid.includes('00000000000000000067') || (r.conv.eddystone && r.conv.eddystone.includes('00000000000000000067')) || r.isTestRaw);
+  // Show counts
+  const totalCount = allDiscovered.length;
+  const shownCount = rows.length;
+
+  if (rows.length === 0) {
+    el.innerHTML = `<div class="hint">No beacons in range (discovered ${totalCount}, filtered ${totalCount - shownCount}). 
+      <br>Your BCPro_211665 is not broadcasting. After Factory Reset, Power On Always defaults to No and all slots disabled.
+      <br>Set General → Power On Always = Yes, SLOT0 = UID 000...67:000...01, SLOT1/2 Disabled, Upload, close app, shake beacon.</div>`;
+  } else {
+    el.innerHTML = `<div class="hint">Discovered ${totalCount} device(s), showing ${shownCount} (filtered out ${totalCount - shownCount} already-saved). Sorted by ${sortMode === 'id' ? 'ID (stable)' : sortMode === 'rssi' ? 'signal (strongest first)' : 'first seen (no jumping)'}. Tap the beacon you are standing next to.</div>`;
+  }
+
+  const testBeacons = rows.filter(r => r.pid.includes('00000000000000000067') || r.pid.includes('00000000-0000-0000-0067-') || (r.conv.eddystone && r.conv.eddystone.includes('00000000000000000067')) || r.isTestRaw);
   if (testBeacons.length) {
     const banner = document.createElement('div');
     banner.className = 'banner';
-    banner.innerHTML = `Found ${testBeacons.length} beacon(s) that look like your configured 67:1 (contains 00000000000000000067). They are highlighted below. List is now sorted by ID (stable alphabetical) - no more jumping. Your other beacons (6c13..., 10077...) are unconfigured factory beacons.`;
+    banner.innerHTML = `Found ${testBeacons.length} beacon(s) that look like your configured 67:1. Highlighted below. If you still don't see it after factory reset, try iBeacon mode: UUID 00000000-0000-0000-0067-000000000001 Major 0 Minor 1.`;
     el.appendChild(banner);
   } else {
     const banner = document.createElement('div');
     banner.className = 'banner';
     banner.style.background = '#ffebee';
     banner.style.color = '#8a0000';
-    banner.innerHTML = `⚠ No beacon with <code>00000000000000000067:000000000001</code> found on-air. Your BCPro_211665 shows it as configured in the vendor app, but it's not broadcasting. Likely causes:
-<br>• <b>Power On Always = No</b> (your screenshot shows No) - beacon sleeps after boot. Set General → Power On Always = <b>Yes</b> → Upload.
-<br>• SLOT1/SLOT2 still enabled with factory IDs (10077...). Disable them.
-<br>• After Upload, the app still shows old list from cache. Power-cycle (remove battery 5s) and close vendor app (it holds BLE connection).
-<br>• Your other beacons (mfr:004c:10077...) are factory defaults, not your 67:1.
-<br><br>List is sorted by ID (stable) so rows won't jump.`;
+    banner.innerHTML = `⚠ No beacon with <code>00000000000000000067:000000000001</code> found. Your BCPro_211665 shows it as configured but it's not on-air.
+      <br>Factory reset sets Power On Always = No and disables slots. You must:
+      <br>1) General → Power On Always = <b>Yes</b>, Beacon Name = BCPro_211665
+      <br>2) SLOT0 UID = Enabled, Namespace 00000000000000000067 Instance 000000000001
+      <br>3) SLOT1, SLOT2 = <b>Disabled</b>
+      <br>4) Upload → wait success → close vendor app → shake beacon → scan again in web mapper.
+      <br>If still nothing, try SLOT0 as iBeacon: UUID 00000000-0000-0000-0067-000000000001 Major 0 Minor 1.`;
     el.appendChild(banner);
   }
 
