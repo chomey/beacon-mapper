@@ -89,6 +89,7 @@ const DEFAULT_CENTER = [37.48412, -122.14993];
 const THUMB_DELTA = 0.0016;          // thumbnail bbox half-span in degrees (~zoom level)
 const EDDYSTONE_SVC = '0000feaa-0000-1000-8000-00805f9b34fb';
 const STORE_KEY = 'beacon_mapper_v1';
+const MIN_RSSI = -80;                 // hide beacons weaker than this dBm; ~-49 when right next to one. Raise to -70 to be stricter.
 const IMG = (minLng,minLat,maxLng,maxLat) =>
   'https://server.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/export' +
   `?bbox=${minLng},${minLat},${maxLng},${maxLat}&bboxSR=4326&size=300,240&format=png&f=image`;
@@ -193,7 +194,7 @@ async function openAdd() {
     return;
   }
   discovered = new Map();
-  showModal('Nearby beacons', '<div class="hint">Scanning… tap the beacon you\'re standing next to (strongest signal is at the top).</div><div id="scanlist"></div>');
+  showModal('Nearby beacons', '<div class="hint">Scanning… list is sorted by id (stable). Tap the beacon you\'re standing next to — use the signal bars/dBm to find the closest.</div><div id="scanlist"></div>');
   navigator.bluetooth.addEventListener('advertisementreceived', onAdvert);
   try {
     currentScan = await navigator.bluetooth.requestLEScan({ acceptAllAdvertisements: true, keepRepeatedDevices: true });
@@ -213,7 +214,7 @@ function renderScanList() {
   const el = document.getElementById('scanlist');
   if (!el) return;
   const have = new Set(beacons.map(b => b.uid));
-  const rows = [...discovered.entries()].filter(([uid]) => !have.has(uid)).sort((a, b) => b[1].rssi - a[1].rssi);
+  const rows = [...discovered.entries()].filter(([uid, info]) => !have.has(uid) && info.rssi >= MIN_RSSI).sort((a, b) => a[0].localeCompare(b[0]));
   el.innerHTML = rows.length ? '' : '<div class="hint">No new beacons in range yet…</div>';
   rows.forEach(([uid, info]) => {
     const row = document.createElement('div');
