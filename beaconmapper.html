@@ -29,6 +29,7 @@
   .meta .name.empty { color: #b0b3b8; font-weight: 400; font-style: italic; }
   .meta .uid { font: 12px/1.3 ui-monospace, monospace; color: #606770; word-break: break-all; margin-top: 2px; }
   .meta .ll { font-size: 12px; color: #8a8d91; margin-top: 4px; }
+  .meta .warn { font-size: 12px; color: #d0021b; font-weight: 600; margin-top: 4px; }
   .del { background: none; color: #e0245e; align-self: center; padding: 12px; }
   .empty-state { text-align: center; color: #8a8d91; padding: 48px 24px; }
   /* modal */
@@ -98,7 +99,7 @@ const ESRI_TILES = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_I
 // ---- state ------------------------------------------------------------------
 let beacons = load();
 let currentScan = null;      // active BluetoothLEScan
-let discovered = new Map();  // uid -> {rssi, kind} (this scan session)
+let discovered = new Map();  // device.id -> {rssi, ids, services, mfr} merged across packets (this scan session)
 let scanRenderPending = false;
 let editMap = null, editMarker = null, pending = null; // pending = {uid, lat, lng, alt}
 
@@ -129,29 +130,62 @@ function parseEddystoneUrl(dv) {
   for (let i = 3; i < dv.byteLength; i++) { const b = dv.getUint8(i); url += b < suffix.length ? suffix[b] : String.fromCharCode(b); }
   return url;
 }
-// Returns {uid, kind} for anything with a stable identifier; null only for pure telemetry.
-function describeAdvert(event) {
+// Pull every identifier present in ONE advert packet (a device rotates several PDUs).
+function extractIds(event) {
+  const out = { services: {}, mfr: {} };
   const eddy = event.serviceData && event.serviceData.get(EDDYSTONE_SVC);
   if (eddy && eddy.byteLength) {
     const t = eddy.getUint8(0);
-    if (t === 0x00) { const u = parseEddystoneUid(eddy); if (u) return { uid: u, kind: 'Eddystone-UID' }; }
-    if (t === 0x10) { const url = parseEddystoneUrl(eddy); if (url) return { uid: `eddystone-url:${url}`, kind: 'Eddystone-URL' }; }
-    if (t === 0x30 && eddy.byteLength >= 10) return { uid: `eddystone-eid:${hex8(eddy, 2, 8)}`, kind: 'Eddystone-EID' };
-    if (t !== 0x20) return { uid: `feaa:${hex8(eddy, 0, eddy.byteLength)}`, kind: 'Eddystone-?' }; // 0x20 = TLM, no stable id
+    if (t === 0x00) { const u = parseEddystoneUid(eddy); if (u) out.eddystoneUid = u; }
+    else if (t === 0x10) { const url = parseEddystoneUrl(eddy); if (url) out.eddystoneUrl = `eddystone-url:${url}`; }
+    else if (t === 0x30 && eddy.byteLength >= 10) out.eddystoneEid = `eddystone-eid:${hex8(eddy, 2, 8)}`;
   }
   const apple = event.manufacturerData && event.manufacturerData.get(0x004c);
   if (apple && apple.byteLength >= 23 && apple.getUint8(0) === 0x02 && apple.getUint8(1) === 0x15) {
     const h = hex8(apple, 2, 16);
-    const uuid = `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
-    return { uid: `ibeacon:${uuid}:${apple.getUint16(18, false)}:${apple.getUint16(20, false)}`, kind: 'iBeacon' };
+    out.ibeacon = `ibeacon:${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}:${apple.getUint16(18, false)}:${apple.getUint16(20, false)}`;
   }
-  // ponytail: raw fallback so nothing is ever dropped. Keys on name/first service/mfr blob — good enough
-  // to geotag a physical unit; swap to the real parser once we confirm the format on screen.
   const name = event.name || (event.device && event.device.name);
-  if (name) return { uid: `name:${name}`, kind: 'named' };
-  if (event.serviceData) for (const [u, dv] of event.serviceData) return { uid: `svc:${u.slice(4,8)}:${hex8(dv,0,Math.min(dv.byteLength,6))}`, kind: `svc ${u.slice(4,8)}` };
-  if (event.manufacturerData) for (const [c, dv] of event.manufacturerData) return { uid: `mfr:${c.toString(16).padStart(4,'0')}:${hex8(dv,0,Math.min(dv.byteLength,6))}`, kind: `mfr ${c.toString(16).padStart(4,'0')}` };
+  if (name) out.name = name;
+  if (event.serviceData) for (const [u, dv] of event.serviceData) out.services[u] = hex8(dv, 0, dv.byteLength);
+  if (event.manufacturerData) for (const [c, dv] of event.manufacturerData) out.mfr[c.toString(16).padStart(4, '0')] = hex8(dv, 0, dv.byteLength);
+  return out;
+}
+// Fold one packet's ids into the device's accumulated record.
+function mergeIds(rec, got) {
+  for (const k of ['eddystoneUid', 'eddystoneUrl', 'eddystoneEid', 'ibeacon', 'name']) if (got[k]) rec.ids[k] = got[k];
+  Object.assign(rec.services, got.services);
+  Object.assign(rec.mfr, got.mfr);
+}
+// Best stable key: a real beacon UID wins; the BLE name is the last resort.
+function primaryId(rec) {
+  const i = rec.ids;
+  if (i.eddystoneUid) return i.eddystoneUid;
+  if (i.ibeacon) return i.ibeacon;
+  if (i.eddystoneEid) return i.eddystoneEid;
+  if (i.eddystoneUrl) return i.eddystoneUrl;
+  for (const u in rec.services) return `svc:${u.slice(4, 8)}:${rec.services[u]}`;
+  for (const c in rec.mfr) return `mfr:${c}:${rec.mfr[c]}`;
+  if (i.name) return `name:${i.name}`;
   return null;
+}
+function primaryKind(rec) {
+  const i = rec.ids;
+  if (i.eddystoneUid) return 'Eddystone-UID';
+  if (i.ibeacon) return 'iBeacon';
+  if (i.eddystoneEid) return 'Eddystone-EID';
+  if (i.eddystoneUrl) return 'Eddystone-URL';
+  if (Object.keys(rec.services).length) return 'service-data';
+  if (Object.keys(rec.mfr).length) return 'mfr-data';
+  return 'named';
+}
+// Only these two key forms are accepted by beacon_map.thrift-cvalidator (exact-match, lowercase).
+const RE_IBEACON = /^ibeacon:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:(0|[1-9][0-9]{0,4}):(0|[1-9][0-9]{0,4})$/;
+const RE_EDDYSTONE = /^eddystone-uid:[0-9a-f]{20}:[0-9a-f]{12}$/;
+function isCanonical(uid) {
+  const m = RE_IBEACON.exec(uid);
+  if (m) return +m[1] <= 65535 && +m[2] <= 65535;   // validator also asserts major/minor <= uint16 max
+  return RE_EDDYSTONE.test(uid);
 }
 
 // ---- list rendering ---------------------------------------------------------
@@ -175,6 +209,7 @@ function renderList() {
       <div class="meta">
         <div class="name ${b.name ? '' : 'empty'}">${b.name ? esc(b.name) : '(no name)'}</div>
         <div class="uid">${esc(b.uid)}</div>
+        ${isCanonical(b.uid) ? '' : '<div class="warn">⚠ not a valid beacon_id — excluded from JSON (needs iBeacon or Eddystone-UID)</div>'}
         <div class="ll">${b.lat.toFixed(6)}, ${b.lng.toFixed(6)} · ${b.alt} m</div>
       </div>
       <button class="del" data-i="${i}">✕</button>`;
@@ -204,9 +239,11 @@ async function openAdd() {
   }
 }
 function onAdvert(event) {
-  const d = describeAdvert(event);
-  if (!d) return;
-  discovered.set(d.uid, { rssi: event.rssi, kind: d.kind });
+  const id = (event.device && event.device.id) || 'anon';
+  const rec = discovered.get(id) || { rssi: event.rssi, ids: {}, services: {}, mfr: {} };
+  rec.rssi = event.rssi;
+  mergeIds(rec, extractIds(event));
+  discovered.set(id, rec);
   if (!scanRenderPending) { scanRenderPending = true; setTimeout(renderScanList, 400); }
 }
 function renderScanList() {
@@ -214,13 +251,17 @@ function renderScanList() {
   const el = document.getElementById('scanlist');
   if (!el) return;
   const have = new Set(beacons.map(b => b.uid));
-  const rows = [...discovered.entries()].filter(([uid, info]) => !have.has(uid) && info.rssi >= MIN_RSSI).sort((a, b) => a[0].localeCompare(b[0]));
+  const rows = [...discovered.values()]
+    .map(rec => ({ rec, pid: primaryId(rec) }))
+    .filter(({ rec, pid }) => pid && !have.has(pid) && rec.rssi >= MIN_RSSI)
+    .sort((a, b) => (a.rec.ids.name || a.pid).localeCompare(b.rec.ids.name || b.pid));
   el.innerHTML = rows.length ? '' : '<div class="hint">No new beacons in range yet…</div>';
-  rows.forEach(([uid, info]) => {
+  rows.forEach(({ rec, pid }) => {
     const row = document.createElement('div');
     row.className = 'scan-row';
-    row.innerHTML = `<span class="bars">${signalBars(info.rssi)}</span><span class="id"><b>${esc(info.kind)}</b><br>${esc(uid)}</span><span class="sig">${info.rssi} dBm</span>`;
-    row.onclick = () => selectBeacon(uid);
+    const label = rec.ids.name ? esc(rec.ids.name) + ' · ' : '';
+    row.innerHTML = `<span class="bars">${signalBars(rec.rssi)}</span><span class="id"><b>${label}${esc(primaryKind(rec))}</b><br>${esc(pid)}</span><span class="sig">${rec.rssi} dBm</span>`;
+    row.onclick = () => selectBeacon(rec);
     el.appendChild(row);
   });
 }
@@ -231,9 +272,9 @@ function stopScan() {
 }
 
 // ---- location + name step ---------------------------------------------------
-function selectBeacon(uid) {
+function selectBeacon(rec) {
   stopScan();
-  pending = { uid, lat: DEFAULT_CENTER[0], lng: DEFAULT_CENTER[1], alt: 0 };
+  pending = { uid: primaryId(rec), ids: rec.ids, services: rec.services, mfr: rec.mfr, lat: DEFAULT_CENTER[0], lng: DEFAULT_CENTER[1], alt: 0 };
   showModal('Set location', `
     <div class="hint" style="margin-bottom:8px">Drag the pin (or tap the map) to where the beacon is. Override GPS if it's off.</div>
     <div id="editmap"></div>
@@ -269,7 +310,8 @@ function confirmAdd() {
 // ---- output -----------------------------------------------------------------
 function buildJson() {
   const out = {};
-  for (const b of beacons) out[b.uid] = { lat: b.lat, lng: b.lng, alt: b.alt, name: b.name || '' };
+  // cconf-ready: only canonical keys, and exactly the WorldNoteBeacon struct fields {lat,lng,alt,name}.
+  for (const b of beacons) if (isCanonical(b.uid)) out[b.uid] = { lat: b.lat, lng: b.lng, alt: b.alt, name: b.name || '' };
   return JSON.stringify({ beacons: out }, null, 2);
 }
 function refreshJson() { const t = document.getElementById('jsonout'); if (t.style.display === 'block') t.value = buildJson(); }
@@ -299,20 +341,26 @@ document.getElementById('show-json').onclick = () => {
 // ---- self-check: parser must reproduce the known screenshot beacon ----------
 (function selfCheck() {
   const dvOf = a => new DataView(new Uint8Array(a).buffer);
-  const cases = [];
-  // Eddystone-UID via serviceData
-  cases.push([{ serviceData: new Map([[EDDYSTONE_SVC, dvOf([0x00,0x00,0xe5,0xa4,0xa7,0xe5,0xa4,0x8f,0x31,0x32,0x33,0x34,0x44,0x58,0x4c,0x29,0x19,0x1a])]]) },
-    'eddystone-uid:e5a4a7e5a48f31323334:44584c29191a', 'Eddystone-UID']);
-  // iBeacon via Apple manufacturer data: 02 15 | uuid(16) | major(2 BE) | minor(2 BE) | tx
-  cases.push([{ manufacturerData: new Map([[0x004c, dvOf([0x02,0x15,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,0,1,0,2,0xc5])]]) },
-    'ibeacon:01020304-0506-0708-090a-0b0c0d0e0f10:1:2', 'iBeacon']);
-  // raw fallback: named device with no beacon frame
-  cases.push([{ name: 'WB1267948' }, 'name:WB1267948', 'named']);
+  const mk = () => ({ rssi: -50, ids: {}, services: {}, mfr: {} });
   let ok = true;
-  for (const [ev, uid, kind] of cases) {
-    const d = describeAdvert(ev);
-    if (!d || d.uid !== uid || d.kind !== kind) { ok = false; console.assert(false, 'self-check FAILED:', uid, '->', d); }
-  }
+  const chk = (cond, msg, got) => { if (!cond) { ok = false; console.assert(false, 'self-check FAILED:', msg, got); } };
+  // Eddystone-UID
+  let r = mk(); mergeIds(r, extractIds({ serviceData: new Map([[EDDYSTONE_SVC, dvOf([0x00,0x00,0xe5,0xa4,0xa7,0xe5,0xa4,0x8f,0x31,0x32,0x33,0x34,0x44,0x58,0x4c,0x29,0x19,0x1a])]]) }));
+  chk(primaryId(r) === 'eddystone-uid:e5a4a7e5a48f31323334:44584c29191a', 'eddystone-uid', primaryId(r));
+  // iBeacon: 02 15 | uuid(16) | major(2 BE) | minor(2 BE) | tx
+  r = mk(); mergeIds(r, extractIds({ manufacturerData: new Map([[0x004c, dvOf([0x02,0x15,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,0,1,0,2,0xc5])]]) }));
+  chk(primaryId(r) === 'ibeacon:01020304-0506-0708-090a-0b0c0d0e0f10:1:2', 'ibeacon', primaryId(r));
+  chk(isCanonical(primaryId(r)), 'produced-ibeacon-canonical', primaryId(r));
+  // key-format validation mirrors beacon_map.thrift-cvalidator
+  chk(isCanonical('eddystone-uid:edd1ebeac04e5defa017:000000000001'), 'accept-eddystone', true);
+  chk(!isCanonical('name:CP28-BE0C'), 'reject-name', false);
+  chk(!isCanonical('ibeacon:E2C56DB5-DFFB-48D2-B060-D0F5A71096E0:1:1'), 'reject-uppercase', false);
+  // name-only fallback
+  r = mk(); mergeIds(r, extractIds({ name: 'CP28-BE0C' }));
+  chk(primaryId(r) === 'name:CP28-BE0C', 'name-fallback', primaryId(r));
+  // merge: a name packet THEN a UID packet from the same device -> UID wins, name retained
+  mergeIds(r, extractIds({ serviceData: new Map([[EDDYSTONE_SVC, dvOf([0x00,0x00,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2])]]) }));
+  chk(primaryId(r) === 'eddystone-uid:01010101010101010101:020202020202' && r.ids.name === 'CP28-BE0C', 'merge-upgrade', r);
   console.log('beacon-mapper self-check', ok ? 'ok' : 'FAILED');
 })();
 
