@@ -154,7 +154,7 @@ function parseAltBeacon(dv) {
   return `altbeacon:${hex8(dv, 0, dv.byteLength)}`;
 }
 
-// ---- advert classification (any beacon format, never silently drop) ---------
+// ---- advert classification (beacons only) ---------
 function hex8(dv, start, len) {
   let s = ''; for (let i = 0; i < len; i++) s += dv.getUint8(start + i).toString(16).padStart(2, '0'); return s;
 }
@@ -166,7 +166,7 @@ function parseEddystoneUrl(dv) {
   for (let i = 3; i < dv.byteLength; i++) { const b = dv.getUint8(i); url += b < suffix.length ? suffix[b] : String.fromCharCode(b); }
   return url;
 }
-// Pull every identifier present in ONE advert packet (a device rotates several PDUs).
+// Pull every beacon identifier present in ONE advert packet.
 function extractIds(event) {
   const out = { services: {}, mfr: {} };
   const eddy = event.serviceData && event.serviceData.get(EDDYSTONE_SVC);
@@ -177,7 +177,7 @@ function extractIds(event) {
     else if (t === 0x20 && eddy.byteLength >= 14) out.eddystoneTlm = `eddystone-tlm:${hex8(eddy, 2, Math.min(12, eddy.byteLength-2))}`;
     else if (t === 0x30 && eddy.byteLength >= 10) out.eddystoneEid = `eddystone-eid:${hex8(eddy, 2, 8)}`;
   }
-  // iBeacon can appear under any company ID (004C Apple is common, but 4458 CP, 0006, etc also used)
+  // iBeacon can appear under any company ID (004C Apple is common, but 4458 etc also used)
   if (event.manufacturerData) {
     for (const [, dv] of event.manufacturerData) {
       if (dv && dv.byteLength >= 23 && dv.getUint8(0) === 0x02 && dv.getUint8(1) === 0x15) {
@@ -198,6 +198,7 @@ function extractIds(event) {
   }
   const name = event.name || (event.device && event.device.name);
   if (name) out.name = name;
+  // Keep raw copies only for debugging merged state, not for beacon identification
   if (event.serviceData) for (const [u, dv] of event.serviceData) out.services[u] = hex8(dv, 0, dv.byteLength);
   if (event.manufacturerData) for (const [c, dv] of event.manufacturerData) out.mfr[c.toString(16).padStart(4, '0')] = hex8(dv, 0, dv.byteLength);
   return out;
@@ -208,7 +209,7 @@ function mergeIds(rec, got) {
   Object.assign(rec.services, got.services);
   Object.assign(rec.mfr, got.mfr);
 }
-// Best stable key: a real beacon UID wins; the BLE name is the last resort.
+// Best stable key: only real beacon formats count.
 function primaryId(rec) {
   const i = rec.ids;
   if (i.eddystoneUid) return i.eddystoneUid;
@@ -217,9 +218,6 @@ function primaryId(rec) {
   if (i.eddystoneEid) return i.eddystoneEid;
   if (i.eddystoneUrl) return i.eddystoneUrl;
   if (i.eddystoneTlm) return i.eddystoneTlm;
-  for (const u in rec.services) return `svc:${u.slice(4, 8)}:${rec.services[u]}`;
-  for (const c in rec.mfr) return `mfr:${c}:${rec.mfr[c]}`;
-  if (i.name) return `name:${i.name}`;
   return null;
 }
 function primaryKind(rec) {
@@ -230,39 +228,31 @@ function primaryKind(rec) {
   if (i.eddystoneEid) return 'Eddystone-EID';
   if (i.eddystoneUrl) return 'Eddystone-URL';
   if (i.eddystoneTlm) return 'Eddystone-TLM';
-  if (Object.keys(rec.services).length) return 'service-data';
-  if (Object.keys(rec.mfr).length) return 'mfr-data';
-  return 'named';
+  return 'unknown';
 }
-// Validation for legacy cconf (iBeacon + Eddystone-UID) kept for reference, but we now support any format.
+// Real beacons only – no mfr-data, svc-data, or name fallbacks.
 const RE_IBEACON = /^ibeacon:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:(0|[1-9][0-9]{0,4}):(0|[1-9][0-9]{0,4})$/;
 const RE_EDDYSTONE = /^eddystone-uid:[0-9a-f]{20}:[0-9a-f]{12}$/;
 const RE_ALTBEACON = /^altbeacon:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:\d+:\d+$/;
 const RE_EDDYSTONE_EID = /^eddystone-eid:[0-9a-f]{16}$/;
 const RE_EDDYSTONE_URL = /^eddystone-url:.+$/;
 const RE_EDDYSTONE_TLM = /^eddystone-tlm:[0-9a-f]+$/;
-const RE_SVC = /^svc:[0-9a-f]{4}:[0-9a-f]+$/;
-const RE_MFR = /^mfr:[0-9a-f]{4}:[0-9a-f]+$/;
-const RE_NAME = /^name:.+$/;
 function isLegacyCanonical(uid) {
   const m = RE_IBEACON.exec(uid);
   if (m) return +m[1] <= 65535 && +m[2] <= 65535;
   return RE_EDDYSTONE.test(uid);
 }
 function isCanonical(uid) {
-  // Any known beacon format is now considered valid/canonical.
   if (!uid || typeof uid !== 'string') return false;
   if (isLegacyCanonical(uid)) return true;
   if (RE_ALTBEACON.test(uid)) return true;
   if (RE_EDDYSTONE_EID.test(uid)) return true;
   if (RE_EDDYSTONE_URL.test(uid)) return true;
   if (RE_EDDYSTONE_TLM.test(uid)) return true;
-  if (RE_SVC.test(uid)) return true;
-  if (RE_MFR.test(uid)) return true;
-  if (RE_NAME.test(uid)) return true;
-  // Fallback: allow any non-empty lowercase id with prefix colon format to be future-proof
-  if (/^[a-z0-9-]+:.+/.test(uid)) return true;
   return false;
+}
+function isRealBeaconId(uid) {
+  return isCanonical(uid);
 }
 
 // ---- cross-format conversion (eddystone <-> ibeacon) ------------------------
@@ -277,10 +267,8 @@ function eddystoneUidToIbeacon(edd) {
   const m = /^eddystone-uid:([0-9a-f]{20}):([0-9a-f]{12})$/.exec(edd);
   if (!m) return null;
   const ns = m[1], inst = m[2];
-  const uuidHex = ns + inst; // 32 chars = 16 bytes
+  const uuidHex = ns + inst;
   const uuid = formatUuid(uuidHex);
-  // Derive major/minor from instance: bytes 4-5 and 6-7 as example => major = middle, minor = last
-  // For test beacon 00000000000000000067:000000000001 -> major 0, minor 1
   const major = parseInt(inst.slice(4,8), 16);
   const minor = parseInt(inst.slice(8,12), 16);
   return `ibeacon:${uuid}:${major}:${minor}`;
@@ -299,84 +287,9 @@ function altbeaconToEddystoneUid(ab) {
   const uuidHex = parseUuidToHex(m[1]);
   return `eddystone-uid:${uuidHex.slice(0,20)}:${uuidHex.slice(20,32)}`;
 }
-function tryDecodeMfrHexToEddystone(rawHex) {
-  if (!rawHex) return null;
-  let hex = rawHex.toLowerCase().replace(/[^0-9a-f]/g, '');
-  if (hex.length < 20) return null;
-  // Only return eddystone if it actually contains the test namespace 00000000000000000067
-  // or the full test beacon 00000000000000000067000000000001
-  // This prevents factory beacons like 10077a1f...0008 from being mis-decoded as 00:8000...
-  if (hex.indexOf('00000000000000000067') !== -1) {
-    const idx = hex.indexOf('00000000000000000067');
-    const ns = '00000000000000000067';
-    let after = hex.substr(idx + 20, 32);
-    // look for instance 000000000001 nearby
-    let instIdx = after.indexOf('000000000001');
-    if (instIdx !== -1) return `eddystone-uid:${ns}:000000000001`;
-    // try next 12 chars as instance if they look like hex
-    let inst = hex.substr(idx + 20, 12);
-    if (/^[0-9a-f]{12}$/.test(inst)) return `eddystone-uid:${ns}:${inst}`;
-    return `eddystone-uid:${ns}:000000000001`;
-  }
-  // Do NOT guess eddystone for other factory beacons - return null so we don't show misleading 00:8000
-  return null;
-}
-function tryDecodeMfrHexToIBeacon(rawHex) {
-  let hex = rawHex.toLowerCase().replace(/[^0-9a-f]/g, '');
-  // Look for iBeacon pattern 0215 + 32 uuid + 4 major + 4 minor (standard)
-  let m = hex.match(/0215([0-9a-f]{32})([0-9a-f]{4})([0-9a-f]{4})/);
-  if (m) {
-    const uuid = formatUuid(m[1]);
-    const major = parseInt(m[2], 16);
-    const minor = parseInt(m[3], 16);
-    return `ibeacon:${uuid}:${major}:${minor}`;
-  }
-  // BlueCharm factory format: first 32 chars are UUID, next 4 major, next 4 minor
-  // e.g. 10077a1f1b56530538010000000000000000000000000800000000
-  // -> UUID 10077a1f-1b56-5309-7801-000000000000, major 0, minor 0, extra...
-  if (hex.length >= 36) {
-    const uuidHex = hex.slice(0, 32);
-    // ensure it looks like a beacon UUID (contains not all zeros)
-    if (uuidHex !== '00000000000000000000000000000000') {
-      const uuid = formatUuid(uuidHex);
-      // try to parse major/minor from bytes after UUID
-      const after = hex.slice(32);
-      // major = first 4 hex after UUID if exists, minor = next 4
-      let major = 0, minor = 0;
-      if (after.length >= 4) major = parseInt(after.slice(0, 4), 16) || 0;
-      if (after.length >= 8) minor = parseInt(after.slice(4, 8), 16) || 0;
-      // For your screenshot: after = 0000000000000000000800000000
-      // -> major 0, minor 0, but we have 08 later at position 12
-      // Search for non-zero 4-char window after UUID that could be minor
-      if (major === 0 && minor === 0) {
-        // look for 0008 or similar
-        const match = after.match(/0008/);
-        if (match) minor = 8;
-      }
-      return `ibeacon:${uuid}:${major}:${minor}`;
-    }
-  }
-  // fallback: last 32 as uuid (old behavior) only if it contains many zeros and looks like test beacon
-  if (hex.length >= 32) {
-    const last32 = hex.slice(-32);
-    if (last32.includes('000000000001') || last32.includes('00000000000000000067')) {
-      return `ibeacon:${formatUuid(last32)}:0:1`;
-    }
-  }
-  return null;
-}
 function getConversions(uid) {
   const out = {};
   if (!uid) return out;
-  // Extract raw hex for mfr/svc
-  let rawHex = null;
-  if (uid.startsWith('mfr:') || uid.startsWith('svc:')) {
-    // mfr:004c:hex or svc:feaa:hex -> hex is last part
-    const parts = uid.split(':');
-    rawHex = parts[parts.length - 1];
-    // strip any non-hex (should be hex)
-    rawHex = rawHex.replace(/[^0-9a-f]/gi, '').toLowerCase();
-  }
   if (uid.startsWith('eddystone-uid:')) {
     out.eddystone = uid;
     const ib = eddystoneUidToIbeacon(uid);
@@ -389,29 +302,8 @@ function getConversions(uid) {
     out.altbeacon = uid;
     const ed = altbeaconToEddystoneUid(uid);
     if (ed) { out.eddystone = ed; const ib = eddystoneUidToIbeacon(ed); if (ib) out.ibeacon = ib; }
-  } else if (uid.startsWith('mfr:') || uid.startsWith('svc:')) {
-    // Try direct decode
-    const edFromMfr = tryDecodeMfrHexToEddystone(rawHex);
-    if (edFromMfr) {
-      out.eddystone = edFromMfr;
-      const ib2 = eddystoneUidToIbeacon(edFromMfr);
-      if (ib2) out.ibeacon = ib2;
-    } else {
-      const ibFromMfr = tryDecodeMfrHexToIBeacon(rawHex);
-      if (ibFromMfr) {
-        out.ibeacon = ibFromMfr;
-        const ed2 = ibeaconToEddystoneUid(ibFromMfr);
-        if (ed2) out.eddystone = ed2;
-      }
-    }
-    // Always keep raw as fallback
-    if (!out.eddystone && rawHex && rawHex.length >= 20) {
-      // last resort: treat first 20+12 as eddystone
-      const edFallback = tryDecodeMfrHexToEddystone(rawHex);
-      if (edFallback) out.eddystone = edFallback;
-    }
   }
-  // For eddystone-url/eid/tlm/name, we don't auto-convert but still show eddystone if present
+  // eddystone-eid/url/tlm don't auto-convert
   return out;
 }
 
@@ -443,7 +335,7 @@ function renderList() {
     list.innerHTML = '<div class="empty-state">No beacons yet.<br>Tap <b>+ Add beacon</b> to scan one.</div>';
     return;
   }
-  // Sort saved beacons by UID for stable display (alphabetical), same as scan list
+  // Sort saved beacons by UID for stable display
   const sorted = [...beacons].map((b, origIdx) => ({ b, origIdx })).sort((a, b) => a.b.uid.localeCompare(b.b.uid));
   list.innerHTML = '';
   sorted.forEach(({ b, origIdx }) => {
@@ -456,22 +348,18 @@ function renderList() {
     const originalUid = b.uid;
     const isConverted = displayUid !== originalUid;
 
-    // Build conversion hints
+    // Build conversion hints (real beacons only)
     let convHtml = '';
     if (decodeMode === 'dual' || decodeMode === 'all') {
       if (originalUid.startsWith('eddystone-uid:') && conv.ibeacon) {
         convHtml += `<div class="converted"><b>↔ iBeacon:</b> ${esc(conv.ibeacon)}</div>`;
       } else if (originalUid.startsWith('ibeacon:') && conv.eddystone) {
         convHtml += `<div class="converted"><b>↔ Eddystone:</b> ${esc(conv.eddystone)}</div>`;
-      } else if ((originalUid.startsWith('mfr:') || originalUid.startsWith('svc:')) && (conv.eddystone || conv.ibeacon)) {
-        if (conv.eddystone) convHtml += `<div class="converted"><b>↔ Eddystone-UID:</b> ${esc(conv.eddystone)}</div>`;
+      } else if (originalUid.startsWith('altbeacon:') && conv.eddystone) {
+        convHtml += `<div class="converted"><b>↔ Eddystone:</b> ${esc(conv.eddystone)}</div>`;
         if (conv.ibeacon) convHtml += `<div class="converted"><b>↔ iBeacon:</b> ${esc(conv.ibeacon)}</div>`;
-        if (conv.eddystone && conv.ibeacon && conv.eddystone === 'eddystone-uid:00000000000000000067:000000000001') {
-          convHtml += `<div class="converted">✓ matches your configured test beacon (000...67:000...01)</div>`;
-        }
       }
     }
-    // If we are in single-format mode, show what it maps from
     let filteredNote = '';
     if (decodeMode === 'eddystone' && originalUid !== displayUid) {
       filteredNote = `<div class="converted"><b>raw:</b> ${esc(originalUid)} → <b>eddystone:</b> ${esc(displayUid)}</div>`;
@@ -490,7 +378,6 @@ function renderList() {
         <div class="ll">${esc(kindLabel)} · ${b.lat.toFixed(6)}, ${b.lng.toFixed(6)} · ${b.alt} m</div>
       </div>
       <button class="del" data-i="${i}">✕</button>`;
-    // strip empty duplicate line
     if (decodeMode === 'all' && originalUid === displayUid) {
       card.querySelectorAll('.uid')[1] && (card.querySelectorAll('.uid')[1].style.display='none');
     }
@@ -537,68 +424,45 @@ function renderScanList() {
   if (!el) return;
   const have = new Set(beacons.map(b => b.uid));
   const allDiscovered = [...discovered.entries()].map(([devId, rec]) => ({ devId, rec }));
+
+  // Only real beacons pass this mapping – non-beacon BLE peripherals are dropped here.
   let rows = allDiscovered
     .map(({ devId, rec }) => {
-      let pid = primaryId(rec);
-      // Stable fallback: use deviceId so key never changes even if primaryId is initially null
-      if (!pid) {
-        pid = `device:${devId.slice(0, 8)}`;
-      }
+      const pid = primaryId(rec);
+      if (!pid) return null; // not a beacon (e.g. mfr-data only)
       const conv = getConversions(pid);
-      const rawJoined = (Object.values(rec.services).join(' ') + ' ' + Object.values(rec.mfr).join(' ') + ' ' + Object.values(rec.ids).join(' ')).toLowerCase();
-      const isTestRaw = rawJoined.includes('00000000000000000067') || rawJoined.includes('000000000001') || pid.includes('00000000000000000067');
-      return { rec, pid, conv, isTestRaw, rawJoined, devId };
+      return { rec, pid, conv, devId };
     })
-    .filter(({ rec, pid }) => {
-      const isTest = pid.includes('00000000000000000067') || pid.includes('00000000-0000-0000-0067-');
-      if (isTest) return rec.rssi >= MIN_RSSI;
-      return !have.has(pid) && rec.rssi >= MIN_RSSI;
+    .filter(x => {
+      if (!x) return false;
+      const { rec, pid } = x;
+      if (!pid) return false;
+      if (have.has(pid)) return false;
+      if (rec.rssi < MIN_RSSI) return false;
+      if (!isRealBeaconId(pid)) return false;
+      return true;
     });
 
-  // Stable sort: by firstSeen (no jumping) is default. Use deviceId as secondary stable key.
+  // Stable sort
   if (sortMode === 'rssi') {
     rows.sort((a, b) => b.rec.rssi - a.rec.rssi || a.rec.firstSeen - b.rec.firstSeen);
   } else if (sortMode === 'id') {
     rows.sort((a, b) => a.pid.localeCompare(b.pid) || a.rec.firstSeen - b.rec.firstSeen);
   } else {
-    // first-seen is the most stable - deviceId never changes, pid may upgrade from unknown->mfr->ibeacon
     rows.sort((a, b) => a.rec.firstSeen - b.rec.firstSeen || a.devId.localeCompare(b.devId));
   }
 
-  // Show counts
-  const totalCount = allDiscovered.length;
+  const totalBle = allDiscovered.length;
   const shownCount = rows.length;
+  const filteredCount = totalBle - shownCount;
 
   if (rows.length === 0) {
-    el.innerHTML = `<div class="hint">No beacons in range (discovered ${totalCount}, filtered ${totalCount - shownCount}). 
-      <br>Your BCPro_211665 is not broadcasting. After Factory Reset, Power On Always defaults to No and all slots disabled.
-      <br>Set General → Power On Always = Yes, SLOT0 = UID 000...67:000...01, SLOT1/2 Disabled, Upload, close app, shake beacon.</div>`;
+    el.innerHTML = `<div class="hint">No beacons in range (scanned ${totalBle} BLE devices, ${filteredCount} filtered as non-beacon / too weak / already saved).<br>Make sure your beacons are broadcasting iBeacon, Eddystone-UID, or AltBeacon.</div>`;
   } else {
-    el.innerHTML = `<div class="hint">Discovered ${totalCount} device(s), showing ${shownCount} (filtered out ${totalCount - shownCount} already-saved). Sorted by ${sortMode === 'id' ? 'ID (stable)' : sortMode === 'rssi' ? 'signal (strongest first)' : 'first seen (no jumping)'}. Tap the beacon you are standing next to.</div>`;
+    el.innerHTML = `<div class="hint">Scanned ${totalBle} BLE devices, ${shownCount} beacon(s) (filtered ${filteredCount} non-beacons). Sorted by ${sortMode === 'id' ? 'ID' : sortMode === 'rssi' ? 'signal' : 'first seen'}. Tap the beacon you're standing next to.</div>`;
   }
 
-  const testBeacons = rows.filter(r => r.pid.includes('00000000000000000067') || r.pid.includes('00000000-0000-0000-0067-') || (r.conv.eddystone && r.conv.eddystone.includes('00000000000000000067')) || r.isTestRaw);
-  if (testBeacons.length) {
-    const banner = document.createElement('div');
-    banner.className = 'banner';
-    banner.innerHTML = `Found ${testBeacons.length} beacon(s) that look like your configured 67:1. Highlighted below. If you still don't see it after factory reset, try iBeacon mode: UUID 00000000-0000-0000-0067-000000000001 Major 0 Minor 1.`;
-    el.appendChild(banner);
-  } else {
-    const banner = document.createElement('div');
-    banner.className = 'banner';
-    banner.style.background = '#ffebee';
-    banner.style.color = '#8a0000';
-    banner.innerHTML = `⚠ No beacon with <code>00000000000000000067:000000000001</code> found. Your BCPro_211665 shows it as configured but it's not on-air.
-      <br>Factory reset sets Power On Always = No and disables slots. You must:
-      <br>1) General → Power On Always = <b>Yes</b>, Beacon Name = BCPro_211665
-      <br>2) SLOT0 UID = Enabled, Namespace 00000000000000000067 Instance 000000000001
-      <br>3) SLOT1, SLOT2 = <b>Disabled</b>
-      <br>4) Upload → wait success → close vendor app → shake beacon → scan again in web mapper.
-      <br>If still nothing, try SLOT0 as iBeacon: UUID 00000000-0000-0000-0067-000000000001 Major 0 Minor 1.`;
-    el.appendChild(banner);
-  }
-
-  rows.forEach(({ rec, pid, conv, isTestRaw }) => {
+  rows.forEach(({ rec, pid, conv }) => {
     const row = document.createElement('div');
     row.className = 'scan-row';
     const label = rec.ids.name ? esc(rec.ids.name) + ' · ' : '';
@@ -610,17 +474,7 @@ function renderScanList() {
     } else if (conv.ibeacon && conv.ibeacon !== pid) {
       extra = `<br><span style="color:#606770">${esc(conv.ibeacon)}</span>`;
     }
-    const isTestBeacon = pid.includes('00000000000000000067') || pid.includes('00000000-0000-0000-0067-000000000001') || (conv.eddystone && conv.eddystone.includes('00000000000000000067')) || isTestRaw;
-    const badge = isTestBeacon ? ' <span style="background:#ffe082;padding:2px 6px;border-radius:6px">TEST 67:1 MATCH</span>' : '';
-    // raw dump for debugging
-    let rawDump = '';
-    const svcKeys = Object.keys(rec.services).map(k => `${k.slice(4,8)}:${rec.services[k]}`).join(' ');
-    const mfrKeys = Object.keys(rec.mfr).map(k => `${k}:${rec.mfr[k]}`).join(' ');
-    const fullRaw = [...Object.values(rec.services), ...Object.values(rec.mfr)].join(' ').toLowerCase();
-    if (fullRaw.includes('000000') || true) {
-      rawDump = `<div style="font-size:10px;color:#8a8d91;margin-top:4px;word-break:break-all">svc: ${esc(svcKeys) || '(none)'}<br>mfr: ${esc(mfrKeys) || '(none)'}<br>ids: ${esc(Object.values(rec.ids).join(', ') || '(none)')}</div>`;
-    }
-    row.innerHTML = `<span class="bars">${signalBars(rec.rssi)}</span><span class="id"><b>${label}${esc(primaryKind(rec))}${badge}</b><br>${esc(pid)}${extra}${rawDump}</span><span class="sig">${rec.rssi} dBm</span>`;
+    row.innerHTML = `<span class="bars">${signalBars(rec.rssi)}</span><span class="id"><b>${label}${esc(primaryKind(rec))}</b><br>${esc(pid)}${extra}</span><span class="sig">${rec.rssi} dBm</span>`;
     row.onclick = () => selectBeacon(rec);
     el.appendChild(row);
   });
@@ -670,21 +524,9 @@ function confirmAdd() {
 // ---- output -----------------------------------------------------------------
 function buildJson() {
   const out = {};
-  // Now supports any beacon format: eddystone-uid, ibeacon, altbeacon, eddystone-eid/url/tlm, svc:*, mfr:*, name:*
-  // The JSON always contains the raw UID you scanned, plus a comment field showing conversions for portability
+  // Real beacons only: eddystone-uid, ibeacon, altbeacon, eddystone-eid/url/tlm
   for (const b of beacons) {
-    const conv = getConversions(b.uid);
     const entry = { lat: b.lat, lng: b.lng, alt: b.alt, name: b.name || '' };
-    // If raw is mfr/svc, also emit the Eddystone equivalent as an extra key for compatibility
-    // so a beacon configured as eddystone-uid:000...67:000...01 that appears as mfr will still be usable
-    if (b.uid.startsWith('mfr:') || b.uid.startsWith('svc:')) {
-      if (conv.eddystone && conv.eddystone !== b.uid) {
-        entry._converted_eddystone = conv.eddystone;
-      }
-      if (conv.ibeacon && conv.ibeacon !== b.uid) {
-        entry._converted_ibeacon = conv.ibeacon;
-      }
-    }
     out[b.uid] = entry;
   }
   return JSON.stringify({ beacons: out }, null, 2);
@@ -718,10 +560,10 @@ document.getElementById('decode-mode').onchange = (e) => {
   saveDecodeMode();
   const hint = document.getElementById('decode-hint');
   if (hint) {
-    if (decodeMode === 'eddystone') hint.textContent = 'Showing all beacons as Eddystone-UID (converted where possible)';
-    else if (decodeMode === 'ibeacon') hint.textContent = 'Showing all beacons as iBeacon (converted where possible)';
-    else if (decodeMode === 'dual') hint.textContent = 'Showing raw + converted: eddystone-uid ↔ ibeacon (e.g. your 000...67:000...01)';
-    else hint.textContent = 'All formats, raw IDs only';
+    if (decodeMode === 'eddystone') hint.textContent = 'Showing beacons as Eddystone-UID (converted where possible)';
+    else if (decodeMode === 'ibeacon') hint.textContent = 'Showing beacons as iBeacon (converted where possible)';
+    else if (decodeMode === 'dual') hint.textContent = 'Showing raw + converted: eddystone-uid ↔ ibeacon';
+    else hint.textContent = 'All beacon formats, raw IDs';
   }
   renderList();
 };
@@ -730,7 +572,6 @@ document.getElementById('sort-mode').onchange = (e) => {
   sortMode = e.target.value;
   saveSortMode();
   renderList();
-  // if modal open, re-render scan list too
   const modal = document.getElementById('modal');
   if (modal && modal.classList.contains('open')) {
     renderScanList();
@@ -739,13 +580,13 @@ document.getElementById('sort-mode').onchange = (e) => {
 (function updateHint() {
   const hint = document.getElementById('decode-hint');
   if (!hint) return;
-  if (decodeMode === 'dual') hint.textContent = 'Dual view: raw + ↔ conversions. Your test beacon 67:1 will be highlighted. Sort is now stable by ID.';
-  else if (decodeMode === 'eddystone') hint.textContent = 'Eddystone-UID view (converted). Sorted stable.';
-  else if (decodeMode === 'ibeacon') hint.textContent = 'iBeacon view (converted). Sorted stable.';
-  else hint.textContent = 'All beacons, any format. Sorted by ID.';
+  if (decodeMode === 'dual') hint.textContent = 'Dual view: raw + ↔ conversions (beacons only).';
+  else if (decodeMode === 'eddystone') hint.textContent = 'Eddystone-UID view.';
+  else if (decodeMode === 'ibeacon') hint.textContent = 'iBeacon view.';
+  else hint.textContent = 'All beacons (iBeacon / Eddystone / AltBeacon).';
 })();
 
-// ---- self-check: parser must reproduce the known screenshot beacon ----------
+// ---- self-check: beacons only ---------------------------------------------
 (function selfCheck() {
   const dvOf = a => new DataView(new Uint8Array(a).buffer);
   const mk = () => ({ rssi: -50, ids: {}, services: {}, mfr: {} });
@@ -754,53 +595,42 @@ document.getElementById('sort-mode').onchange = (e) => {
   // Eddystone-UID
   let r = mk(); mergeIds(r, extractIds({ serviceData: new Map([[EDDYSTONE_SVC, dvOf([0x00,0x00,0xe5,0xa4,0xa7,0xe5,0xa4,0x8f,0x31,0x32,0x33,0x34,0x44,0x58,0x4c,0x29,0x19,0x1a])]]) }));
   chk(primaryId(r) === 'eddystone-uid:e5a4a7e5a48f31323334:44584c29191a', 'eddystone-uid', primaryId(r));
-  // iBeacon: 02 15 | uuid(16) | major(2 BE) | minor(2 BE) | tx
+  // iBeacon
   r = mk(); mergeIds(r, extractIds({ manufacturerData: new Map([[0x004c, dvOf([0x02,0x15,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,0,1,0,2,0xc5])]]) }));
   chk(primaryId(r) === 'ibeacon:01020304-0506-0708-090a-0b0c0d0e0f10:1:2', 'ibeacon', primaryId(r));
   chk(isCanonical(primaryId(r)), 'produced-ibeacon-canonical', primaryId(r));
-  // legacy cconf validation
+  // legacy validation
   chk(isLegacyCanonical('eddystone-uid:edd1ebeac04e5defa017:000000000001'), 'accept-eddystone', true);
   chk(!isLegacyCanonical('name:CP28-BE0C'), 'legacy-reject-name', true);
-  chk(!isLegacyCanonical('ibeacon:E2C56DB5-DFFB-48D2-B060-D0F5A71096E0:1:1'), 'legacy-reject-uppercase', true);
-  // new any-format support: these should now be accepted as canonical
-  chk(isCanonical('name:CP28-BE0C'), 'accept-name-any', true);
-  chk(isCanonical('mfr:004c:0201150a...'), 'accept-mfr-any', true);
-  chk(isCanonical('svc:feaa:00...'), 'accept-svc-any', true);
+  // Real beacons only
   chk(isCanonical('altbeacon:01020304-0506-0708-090a-0b0c0d0e0f10:1:2'), 'accept-altbeacon', true);
   chk(isCanonical('eddystone-eid:0102030405060708'), 'accept-eid', true);
   chk(isCanonical('eddystone-url:https://example.com'), 'accept-url', true);
   chk(isCanonical('eddystone-tlm:010203040506'), 'accept-tlm', true);
+  chk(!isCanonical('mfr:004c:0102'), 'reject-mfr', true);
+  chk(!isCanonical('svc:feaa:0102'), 'reject-svc', true);
+  chk(!isCanonical('name:CP28-BE0C'), 'reject-name', true);
   // AltBeacon parsing
   r = mk(); mergeIds(r, extractIds({ manufacturerData: new Map([[0x0118, dvOf([0xBE,0xAC,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,0,1,0,2,0xc5,0x00])]]) }));
   chk(primaryId(r) && primaryId(r).startsWith('altbeacon:'), 'altbeacon', primaryId(r));
   // Eddystone-URL
   r = mk(); mergeIds(r, extractIds({ serviceData: new Map([[EDDYSTONE_SVC, dvOf([0x10,0x00,0x03, 0x67,0x6f,0x6f,0x2e,0x67,0x6c])]]) }));
   chk(primaryId(r) && primaryId(r).startsWith('eddystone-url:'), 'eddystone-url', primaryId(r));
-  // name-only fallback
-  r = mk(); mergeIds(r, extractIds({ name: 'CP28-BE0C' }));
-  chk(primaryId(r) === 'name:CP28-BE0C', 'name-fallback', primaryId(r));
-  // service-data generic fallback
+  // Non-beacon should be dropped (primaryId null)
+  r = mk(); mergeIds(r, extractIds({ name: 'RandomDevice' }));
+  chk(primaryId(r) === null, 'non-beacon-name-dropped', primaryId(r));
   r = mk(); mergeIds(r, extractIds({ serviceData: new Map([['0000fd6f-0000-1000-8000-00805f9b34fb', dvOf([0x01,0x02,0x03])]]) }));
-  chk(primaryId(r) === 'svc:fd6f:010203', 'svc-fallback', primaryId(r));
-  // mfr-data generic fallback
+  chk(primaryId(r) === null, 'non-beacon-svc-dropped', primaryId(r));
   r = mk(); mergeIds(r, extractIds({ manufacturerData: new Map([[0x0059, dvOf([0x01,0x02])]]) }));
-  chk(primaryId(r) === 'mfr:0059:0102', 'mfr-fallback', primaryId(r));
-  // merge: a name packet THEN a UID packet from the same device -> UID wins, name retained
+  chk(primaryId(r) === null, 'non-beacon-mfr-dropped', primaryId(r));
+  // merge: name packet then UID packet -> UID wins, name retained
   r = mk(); mergeIds(r, extractIds({ name: 'CP28-BE0C' }));
   mergeIds(r, extractIds({ serviceData: new Map([[EDDYSTONE_SVC, dvOf([0x00,0x00,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2])]]) }));
   chk(primaryId(r) === 'eddystone-uid:01010101010101010101:020202020202' && r.ids.name === 'CP28-BE0C', 'merge-upgrade', r);
-  // cross-format conversion: eddystone <-> ibeacon
-  const testEddy = 'eddystone-uid:00000000000000000067:000000000001';
+  // cross-format conversion roundtrip
+  const testEddy = 'eddystone-uid:0102030405060708090a:0b0c0d0e0f10';
   const testIbe = ibeaconToEddystoneUid(eddystoneUidToIbeacon(testEddy));
   chk(testIbe === testEddy, 'roundtrip-eddy-ibeacon-eddy', testIbe);
-  const ib = eddystoneUidToIbeacon(testEddy);
-  chk(ib && ib.includes('00000000-0000-0000-0067-000000000001'), 'eddy-to-ibeacon-contains-67-1', ib);
-  const edFromIbe = ibeaconToEddystoneUid('ibeacon:00000000-0000-0000-0067-000000000001:0:1');
-  chk(edFromIbe === testEddy, 'ibeacon-to-eddy-67-1', edFromIbe);
-  // mfr hex fallback should extract 32-char window
-  const mfrHex = '10077e1fd6fae28538010000000000000000000000000800000000';
-  const edFromMfr = tryDecodeMfrHexToEddystone(mfrHex);
-  chk(edFromMfr && edFromMfr.startsWith('eddystone-uid:'), 'mfr-to-eddy', edFromMfr);
   console.log('beacon-mapper self-check', ok ? 'ok' : 'FAILED');
 })();
 
