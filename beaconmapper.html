@@ -114,7 +114,7 @@
 <script>
 // ---- config knobs -----------------------------------------------------------
 // Venue fallback center (used only if GPS is unavailable). Tune to your building.
-const VERSION = "proximity-v8 · Show-all + adjustable Min-signal slider to isolate a beacon";
+const VERSION = "proximity-v9 · scan controls (Min-signal/Show-all/Sort) INSIDE the scan sheet";
 const DEFAULT_CENTER = [37.48412, -122.14993];
 const THUMB_DELTA = 0.0016;          // thumbnail bbox half-span in degrees (~zoom level)
 const EDDYSTONE_SVC = '0000feaa-0000-1000-8000-00805f9b34fb';
@@ -483,7 +483,26 @@ async function openAdd() {
     return;
   }
   discovered = new Map();
-  showModal('Nearby beacons', '<div class="hint">Scanning… list is sorted by id (stable). Tap the beacon you\'re standing next to — use the signal bars/dBm to find the closest.</div><div id="scanlist"></div>');
+  showModal('Nearby beacons', `
+    <div style="display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;margin-bottom:10px;font-size:13px;background:#eef2ff;padding:10px;border-radius:10px">
+      <label style="display:flex;align-items:center;gap:8px;flex:1 1 100%">
+        <span style="white-space:nowrap">Min signal: <b id="scan-min-rssi-val"></b> dBm</span>
+        <input type="range" id="scan-min-rssi" min="-100" max="-30" step="1" style="flex:1">
+      </label>
+      <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="scan-show-all"> Show all devices</label>
+      <label style="display:flex;align-items:center;gap:6px">Sort
+        <select id="scan-sort"><option value="rssi">Signal (strongest)</option><option value="first">First seen</option><option value="id">ID</option></select>
+      </label>
+    </div>
+    <div class="hint">Drag <b>Min signal</b> toward −40 and hold your beacon against the phone — the others drop away, leaving just yours to tap.</div>
+    <div id="scanlist"></div>`);
+  // Wire the in-sheet controls — usable WHILE the scan modal is open (the top toolbar is hidden behind it).
+  const _smr = document.getElementById('scan-min-rssi'), _smrv = document.getElementById('scan-min-rssi-val');
+  if (_smr) { _smr.value = String(minRssi); if (_smrv) _smrv.textContent = String(minRssi); _smr.oninput = (e) => { minRssi = parseInt(e.target.value, 10); if (_smrv) _smrv.textContent = String(minRssi); saveMinRssi(); renderScanList(); }; }
+  const _ssa = document.getElementById('scan-show-all');
+  if (_ssa) { _ssa.checked = showAll; _ssa.onchange = (e) => { showAll = e.target.checked; saveShowAll(); renderScanList(); }; }
+  const _ss = document.getElementById('scan-sort');
+  if (_ss) { _ss.value = sortMode; _ss.onchange = (e) => { sortMode = e.target.value; saveSortMode(); renderScanList(); }; }
   navigator.bluetooth.addEventListener('advertisementreceived', onAdvert);
   try {
     currentScan = await navigator.bluetooth.requestLEScan({ acceptAllAdvertisements: true, keepRepeatedDevices: true });
