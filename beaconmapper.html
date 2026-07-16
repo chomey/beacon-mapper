@@ -87,6 +87,8 @@
     <option value="rssi">Signal (strongest first)</option>
     <option value="first">First seen</option>
   </select>
+  <label for="name-filter" style="margin-left:12px">Name filter:</label>
+  <input id="name-filter" placeholder="e.g. WN-" title="Show only name-based beacons whose name contains this text. Leave blank to show every named device." style="font:inherit;padding:8px 10px;border:1px solid #ccd0d5;border-radius:8px;width:110px">
   <span class="hint" id="decode-hint">Shows raw IDs + converted equivalents</span>
 </div>
 <div id="unsupported" class="banner" style="display:none">
@@ -109,12 +111,24 @@
 <script>
 // ---- config knobs -----------------------------------------------------------
 // Venue fallback center (used only if GPS is unavailable). Tune to your building.
-const VERSION = "bc-fix-v4 + permissive isCanonical + BC/CP name fallback – commit b14496f+";
+const VERSION = "system-name-v5 · name-based (System-frame) beacons + name filter · no fabrication";
 const DEFAULT_CENTER = [37.48412, -122.14993];
 const THUMB_DELTA = 0.0016;          // thumbnail bbox half-span in degrees (~zoom level)
 const EDDYSTONE_SVC = '0000feaa-0000-1000-8000-00805f9b34fb';
 const STORE_KEY = 'beacon_mapper_v1';
-const MIN_RSSI = -90;                 // permissive for Blue Charm: was -80, now -90 to show more beacons (BCPro  -45, CP28 -55)
+const MIN_RSSI = -90;                 // permissive: show weak beacons too (BCPro ~-45, CP28 ~-55)
+// Name filter for name-based (System-frame) beacons. iOS/Web Bluetooth strips the
+// iBeacon/Eddystone payload, but the Complete Local Name still crosses – so we key
+// name-based beacons on their name. Set this to your fleet's name prefix (e.g. "WN-")
+// to show only your beacons; leave blank to show every named device in range.
+const NAME_FILTER_KEY = 'beacon_mapper_name_filter';
+let nameFilter = (() => { try { return localStorage.getItem(NAME_FILTER_KEY) || ''; } catch { return ''; } })();
+function saveNameFilter() { try { localStorage.setItem(NAME_FILTER_KEY, nameFilter); } catch {} }
+function nameMatchesFilter(name) {
+  if (!name) return false;
+  const f = nameFilter.trim().toLowerCase();
+  return f ? name.toLowerCase().includes(f) : true;   // blank filter = accept any named device
+}
 console.log("beacon-mapper", VERSION, "loaded");
 const IMG = (minLng,minLat,maxLng,maxLat) =>
   'https://server.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/export' +
@@ -226,59 +240,13 @@ function extractIds(event) {
   if (event.serviceData) for (const [u, dv] of event.serviceData) out.services[u] = hex8(dv, 0, dv.byteLength);
   if (event.manufacturerData) for (const [c, dv] of event.manufacturerData) out.mfr[c.toString(16).padStart(4, '0')] = hex8(dv, 0, dv.byteLength);
 
-  const lowerNameForFallback = (name || '').toLowerCase();
-  // Keep raw copies only for debugging merged state, not for beacon identification
-  // (already done above, but we need name lowercased for Blue Charm check)
-  // --- Blue Charm factory fallback (real beacons only, but multi-beacon) ---
-  // After 0bbff3a we filtered to real beacons only (iBeacon/Eddystone/AltBeacon)
-  // which is correct – generic BLE should not show. However BCPro_211665 was still
-  // filtered as non-beacon (25 scanned, 1 beacon in screenshot, left shows
-  // BCPro_211665 iBeacon 3838:4949). Its mfr data may not have 02 15 at offset 0
-  // or uses all-zero UUID factory format. Allow BC/CP named beacons as beacons
-  // when no standard beacon was parsed, but keep filtering generic BLE.
-  if (!out.ibeacon && !out.altbeacon && !out.eddystoneUid && !out.eddystoneUrl && !out.eddystoneEid && !out.eddystoneTlm) {
-    const isBlueCharmLike = lowerNameForFallback.startsWith('bc') || lowerNameForFallback.startsWith('cp') || lowerNameForFallback.includes('bluecharm') || lowerNameForFallback.includes('blue charm');
-    if (isBlueCharmLike && event.manufacturerData) {
-      for (const [, dv] of event.manufacturerData) {
-        if (!dv || dv.byteLength < 4) continue;
-        // Try any plausible parsing, most permissive first
-        // 1) Standard factory: first 16 bytes UUID, next 2 major, next 2 minor (even if UUID all zeros)
-        if (dv.byteLength >= 20) {
-          const h = hex8(dv, 0, 16);
-          const major = dv.getUint16(16, false);
-          const minor = dv.getUint16(18, false);
-          // If major/minor look plausible (0-65535) or matches screenshot 3838:4949, accept
-          // Even if UUID is all zeros, accept for Blue Charm – we want it to show
-          const uuid = `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
-          out.ibeacon = `ibeacon:${uuid}:${major}:${minor}`;
-          break;
-        }
-        if (dv.byteLength >= 16) {
-          // Fallback: use whatever 16 bytes at start as UUID, major/minor from last 4 bytes
-          const h = hex8(dv, 0, 16);
-          const uuid = `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
-          let major = 0, minor = 0;
-          if (dv.byteLength >= 18) major = dv.getUint16(dv.byteLength - 4, false);
-          if (dv.byteLength >= 20) minor = dv.getUint16(dv.byteLength - 2, false);
-          // For BCPro_211665 screenshot known values
-          if (lowerNameForFallback.includes('211665')) { major = 3838; minor = 4949; }
-          out.ibeacon = `ibeacon:${uuid}:${major}:${minor}`;
-          break;
-        }
-      }
-    }
-  }
-  // If still no beacon but name is Blue Charm-like, create a synthetic altbeacon so it at least appears
-  // (prevents filtering 24 non-beacons when one is actually BCPro). Use default Eddystone namespace from CP28 screenshot.
-  if (!out.ibeacon && !out.altbeacon && !out.eddystoneUid && !out.eddystoneUrl && !out.eddystoneEid && !out.eddystoneTlm) {
-    if (lowerNameForFallback.startsWith('bc') || lowerNameForFallback.startsWith('cp')) {
-      // Use common Blue Charm UUID seen in mapper: e2c56db5-dffb-48d2-b060-d0f5a71096e0
-      // and major/minor from screenshot if available
-      let major = 5, minor = 6;
-      if (lowerNameForFallback.includes('211665')) { major = 3838; minor = 4949; }
-      out.ibeacon = `ibeacon:e2c56db5-dffb-48d2-b060-d0f5a71096e0:${major}:${minor}`;
-    }
-  }
+  // NOTE: no synthetic/fabricated IDs. Previous versions invented a fake
+  // ibeacon:e2c56db5-... from the device name, which showed wrong identities.
+  // Real beacon payloads (iBeacon/Eddystone/AltBeacon) are parsed above when the
+  // platform delivers them. When only the name crosses (the common case on
+  // iOS/Web Bluetooth, where the raw payload is stripped), the device is still
+  // usable: primaryId() falls back to name:<name> so name-based (System-frame /
+  // any connectable named) beacons can be mapped. See nameMatchesFilter().
   return out;
 }
 // Fold one packet's ids into the device's accumulated record.
@@ -301,14 +269,11 @@ function primaryId(rec) {
   if (i.eddystoneEid) return i.eddystoneEid;
   if (i.eddystoneUrl) return i.eddystoneUrl;
   if (i.eddystoneTlm) return i.eddystoneTlm;
-  // Fallback for Blue Charm factory beacons that might still be parsed as non-beacon:
-  // if name starts with BC/CP, use name as ID so it at least appears (will be accepted by isCanonical)
-  if (i.name) {
-    const low = i.name.toLowerCase();
-    if (low.startsWith('bc') || low.startsWith('cp') || low.includes('blue')) {
-      return `name:${i.name}`;
-    }
-  }
+  // Name-based (System-frame / any connectable named device). On iOS & Android
+  // the Complete Local Name crosses even when the iBeacon/Eddystone payload is
+  // stripped/denylisted, so the name is the portable cross-platform key. The
+  // optional name filter (renderScanList) narrows this to your fleet.
+  if (i.name) return `name:${i.name}`;
   return null;
 }
 function primaryKind(rec) {
@@ -319,8 +284,7 @@ function primaryKind(rec) {
   if (i.eddystoneEid) return 'Eddystone-EID';
   if (i.eddystoneUrl) return 'Eddystone-URL';
   if (i.eddystoneTlm) return 'Eddystone-TLM';
-  const maybeName = (i.name || '').toLowerCase();
-  if (maybeName.startsWith('bc') || maybeName.startsWith('cp') || maybeName.includes('blue')) return 'BlueCharm';
+  if (i.name) return 'Named';
   return 'unknown';
 }
 // Real beacons only – no mfr-data, svc-data, or name fallbacks.
@@ -346,11 +310,11 @@ function isLegacyCanonical(uid) {
 function isCanonical(uid) {
   if (!uid || typeof uid !== 'string') return false;
   const lower = uid.toLowerCase();
-  // Always accept real beacon prefixes – guarantees Blue Charm shows
+  // Real beacon prefixes
   if (lower.startsWith('ibeacon:') || lower.startsWith('altbeacon:') || lower.startsWith('eddystone-')) return true;
-  // Blue Charm name fallback: allow name:BC... / CP... / BlueCharm as real beacons
-  // so they are not filtered as generic BLE (mapper previously filtered to 1 beacon, missing BCPro)
-  if (lower.startsWith('name:bc') || lower.startsWith('name:cp') || lower.includes('bluecharm') || lower.includes('blue charm')) return true;
+  // Name-based (System-frame / any connectable named device) beacon. The optional
+  // name filter in renderScanList narrows which named devices are shown.
+  if (lower.startsWith('name:')) return true;
   if (isLegacyCanonical(uid)) return true;
   if (RE_ALTBEACON.test(uid)) return true;
   if (RE_EDDYSTONE_EID.test(uid)) return true;
@@ -539,41 +503,22 @@ function renderScanList() {
   let allRows = allDiscovered.map(({ devId, rec }) => {
     const pid = primaryId(rec);
     const conv = pid ? getConversions(pid) : {};
-    // Check if this looks like a Blue Charm beacon (name starts with BC/CP or iBeacon with BlueCharmBeacons ascii)
-    const name = (rec.ids.name||'').toLowerCase();
-    const isBlueCharmName = name.startsWith('bc') || name.startsWith('cp') || name.includes('blue');
-    // For Blue Charm, accept even if primaryId null (factory format) – create synthetic pid from name if needed
-    let finalPid = pid;
-    let isBeacon = !!pid && isRealBeaconId(pid);
-    if (!isBeacon && isBlueCharmName) {
-      // Force Blue Charm to be considered beacon for legacy support (real beacons only, but include Blue Charm multi-beacons)
-      finalPid = pid || `name:${rec.ids.name||'unknown'}`;
-      isBeacon = true;
-      console.log(`[${VERSION}] forcing Blue Charm as beacon`, finalPid, rec.ids.name);
-    }
-    return { rec, pid: finalPid, conv, devId, isBeacon, origPid: pid };
+    return { rec, pid, conv, devId, isBeacon: !!pid && isRealBeaconId(pid) };
   });
 
-  let beaconRows = allRows.filter(r=>r.isBeacon).filter(x=>{
+  let beaconRows = allRows.filter(r => r.isBeacon).filter(x => {
     if (!x.pid) return false;
-    if (have.has(x.pid)) {
-      console.log(`[${VERSION}] filtered have.has`, x.pid);
-      return false;
-    }
-    if (x.rec.rssi < MIN_RSSI) {
-      console.log(`[${VERSION}] filtered rssi`, x.pid, x.rec.rssi);
-      return false;
-    }
-    if (!isRealBeaconId(x.pid) && !x.pid.toLowerCase().startsWith('name:bc') && !x.pid.toLowerCase().startsWith('name:cp')) {
-      // Allow name:bc/cp as beacon even if isRealBeaconId says false (for Blue Charm)
-      console.log(`[${VERSION}] filtered isRealBeaconId false`, x.pid, "isCanonical", isCanonical(x.pid));
-      return false;
-    }
+    if (have.has(x.pid)) return false;
+    if (x.rec.rssi < MIN_RSSI) return false;
+    // Name-based (System-frame / connectable named) beacons: apply the optional
+    // name filter so the list shows just your fleet, not every named BLE device
+    // in range. Real payload beacons (iBeacon/Eddystone/AltBeacon) are never name-filtered.
+    if (x.pid.toLowerCase().startsWith('name:') && !nameMatchesFilter(x.rec.ids.name)) return false;
     return true;
   });
   let rows = beaconRows;
-  let nonBeaconRows = allRows.filter(r=>!r.isBeacon);
-  console.log(`[${VERSION}] rows after filter`, rows.length, rows.map(r=>r.pid), "non-beacon", nonBeaconRows.length);
+  let nonBeaconRows = allRows.filter(r => !r.isBeacon);
+  console.log(`[${VERSION}] discovered=${allDiscovered.length} beacons=${rows.length} filter="${nameFilter}"`, rows.map(r => r.pid));
 
   // Stable sort
   if (sortMode === 'rssi') {
@@ -709,6 +654,16 @@ document.getElementById('sort-mode').onchange = (e) => {
     renderScanList();
   }
 };
+const nameFilterInput = document.getElementById('name-filter');
+if (nameFilterInput) {
+  nameFilterInput.value = nameFilter;
+  nameFilterInput.oninput = (e) => {
+    nameFilter = e.target.value;
+    saveNameFilter();
+    const modal = document.getElementById('modal');
+    if (modal && modal.classList.contains('open')) renderScanList();
+  };
+}
 (function updateHint() {
   const hint = document.getElementById('decode-hint');
   if (!hint) return;
@@ -741,16 +696,16 @@ document.getElementById('sort-mode').onchange = (e) => {
   chk(isCanonical('eddystone-tlm:010203040506'), 'accept-tlm', true);
   chk(!isCanonical('mfr:004c:0102'), 'reject-mfr', true);
   chk(!isCanonical('svc:feaa:0102'), 'reject-svc', true);
-  chk(!isCanonical('name:CP28-BE0C'), 'reject-name', true);
+  chk(isCanonical('name:CP28-BE0C'), 'accept-name', true);   // name-based beacons now accepted
   // AltBeacon parsing
   r = mk(); mergeIds(r, extractIds({ manufacturerData: new Map([[0x0118, dvOf([0xBE,0xAC,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,0,1,0,2,0xc5,0x00])]]) }));
   chk(primaryId(r) && primaryId(r).startsWith('altbeacon:'), 'altbeacon', primaryId(r));
   // Eddystone-URL
   r = mk(); mergeIds(r, extractIds({ serviceData: new Map([[EDDYSTONE_SVC, dvOf([0x10,0x00,0x03, 0x67,0x6f,0x6f,0x2e,0x67,0x6c])]]) }));
   chk(primaryId(r) && primaryId(r).startsWith('eddystone-url:'), 'eddystone-url', primaryId(r));
-  // Non-beacon should be dropped (primaryId null)
+  // Named device is now recognized as a name-based (System-frame) beacon
   r = mk(); mergeIds(r, extractIds({ name: 'RandomDevice' }));
-  chk(primaryId(r) === null, 'non-beacon-name-dropped', primaryId(r));
+  chk(primaryId(r) === 'name:RandomDevice', 'name-based-beacon', primaryId(r));
   r = mk(); mergeIds(r, extractIds({ serviceData: new Map([['0000fd6f-0000-1000-8000-00805f9b34fb', dvOf([0x01,0x02,0x03])]]) }));
   chk(primaryId(r) === null, 'non-beacon-svc-dropped', primaryId(r));
   r = mk(); mergeIds(r, extractIds({ manufacturerData: new Map([[0x0059, dvOf([0x01,0x02])]]) }));
