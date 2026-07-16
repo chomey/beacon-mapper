@@ -112,7 +112,7 @@
 <script>
 // ---- config knobs -----------------------------------------------------------
 // Venue fallback center (used only if GPS is unavailable). Tune to your building.
-const VERSION = "show-all-v6 · name-based beacons + name filter + Show-all-devices toggle";
+const VERSION = "show-all-v7 · shows every device; scan hint reports Show-all state";
 const DEFAULT_CENTER = [37.48412, -122.14993];
 const THUMB_DELTA = 0.0016;          // thumbnail bbox half-span in degrees (~zoom level)
 const EDDYSTONE_SVC = '0000feaa-0000-1000-8000-00805f9b34fb';
@@ -551,10 +551,11 @@ function renderScanList() {
   const shownCount = rows.length;
   const filteredCount = totalBle - shownCount;
 
+  const modeNote = showAll ? 'Show-all ON — every device' : 'beacons only';
   if (rows.length === 0) {
-    el.innerHTML = `<div class="hint">No beacons in range (scanned ${totalBle} BLE devices, ${filteredCount} filtered as non-beacon / too weak / already saved).<br>Make sure your beacons are broadcasting iBeacon, Eddystone-UID, or AltBeacon.</div>`;
+    el.innerHTML = `<div class="hint">No devices to show (scanned ${totalBle} BLE ${totalBle === 1 ? 'device' : 'devices'}; ${modeNote}).<br>${totalBle === 0 ? 'Nothing is being received — check Bluetooth is on and the scan permission/flag is enabled.' : 'Enable "Show all devices" to list everything, or clear the Name filter.'}</div>`;
   } else {
-    el.innerHTML = `<div class="hint">Scanned ${totalBle} BLE devices, ${shownCount} beacon(s) (filtered ${filteredCount} non-beacons). Sorted by ${sortMode === 'id' ? 'ID' : sortMode === 'rssi' ? 'signal' : 'first seen'}. Tap the beacon you're standing next to.</div>`;
+    el.innerHTML = `<div class="hint">Scanned ${totalBle}, showing ${shownCount} (${modeNote}${filteredCount ? `, ${filteredCount} hidden: too weak / already saved` : ''}). Sorted by ${sortMode === 'id' ? 'ID' : sortMode === 'rssi' ? 'signal' : 'first seen'}. Tap the one you're standing next to.</div>`;
   }
 
   rows.forEach(({ rec, pid, conv }) => {
