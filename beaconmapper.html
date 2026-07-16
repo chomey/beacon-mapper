@@ -178,22 +178,43 @@ function extractIds(event) {
     else if (t === 0x30 && eddy.byteLength >= 10) out.eddystoneEid = `eddystone-eid:${hex8(eddy, 2, 8)}`;
   }
   // iBeacon can appear under any company ID (004C Apple is common, but 4458 etc also used)
+  // Real beacons only: iBeacon, Eddystone-UID, AltBeacon, EID/URL/TLM.
+  // Blue Charm BCPro_211665 (seen in scanner as iBeacon 3838:4949) was being
+  // filtered as non-beacon after we removed mfr/svc/name fallbacks. It still
+  // broadcasts a valid iBeacon frame, but sometimes it appears as AltBeacon
+  // or with the 02 15 header not at offset 0. Scan anywhere in the mfr payload.
   if (event.manufacturerData) {
-    for (const [, dv] of event.manufacturerData) {
-      if (dv && dv.byteLength >= 23 && dv.getUint8(0) === 0x02 && dv.getUint8(1) === 0x15) {
-        const h = hex8(dv, 2, 16);
-        const major = dv.getUint16(18, false);
-        const minor = dv.getUint16(20, false);
-        out.ibeacon = `ibeacon:${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}:${major}:${minor}`;
-        break;
+    outer: for (const [, dv] of event.manufacturerData) {
+      if (!dv || dv.byteLength < 23) continue;
+      // Search for iBeacon 0x02 0x15 anywhere in the payload (factory beacons may have prefix)
+      for (let off = 0; off <= dv.byteLength - 23; off++) {
+        if (dv.getUint8(off) === 0x02 && dv.getUint8(off + 1) === 0x15) {
+          const h = hex8(dv, off + 2, 16);
+          const major = dv.getUint16(off + 18, false);
+          const minor = dv.getUint16(off + 20, false);
+          out.ibeacon = `ibeacon:${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}:${major}:${minor}`;
+          break outer;
+        }
       }
     }
   }
-  // AltBeacon can appear under any company ID
+  // AltBeacon can appear under any company ID – also scan for BE AC anywhere
   if (event.manufacturerData) {
-    for (const [, dv] of event.manufacturerData) {
-      const ab = parseAltBeacon(dv);
-      if (ab) { out.altbeacon = ab; break; }
+    outerAlt: for (const [, dv] of event.manufacturerData) {
+      if (!dv || dv.byteLength < 22) continue;
+      // quick check at 0, then scan
+      for (let off = 0; off <= dv.byteLength - 22; off++) {
+        if (dv.getUint8(off) === 0xBE && dv.getUint8(off + 1) === 0xAC) {
+          // slice a view starting at off
+          const sliceLen = dv.byteLength - off;
+          const tmp = new DataView(dv.buffer, dv.byteOffset + off, sliceLen);
+          const ab = parseAltBeacon(tmp);
+          if (ab) { out.altbeacon = ab; break outerAlt; }
+        }
+      }
+      // fallback to original parse at offset 0
+      const ab0 = parseAltBeacon(dv);
+      if (ab0) { out.altbeacon = ab0; break; }
     }
   }
   const name = event.name || (event.device && event.device.name);
