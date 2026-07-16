@@ -238,9 +238,8 @@ const RE_EDDYSTONE_EID = /^eddystone-eid:[0-9a-f]{16}$/;
 const RE_EDDYSTONE_URL = /^eddystone-url:.+$/;
 const RE_EDDYSTONE_TLM = /^eddystone-tlm:[0-9a-f]+$/;
 function isLegacyCanonical(uid) {
-  const m = RE_IBEACON.exec(uid);
-  if (m) return +m[1] <= 65535 && +m[2] <= 65535;
-  return RE_EDDYSTONE.test(uid);
+  // Blue Charm and other iBeacon devices should always show – don't filter by major/minor range.
+  return RE_IBEACON.test(uid) || RE_EDDYSTONE.test(uid);
 }
 function isCanonical(uid) {
   if (!uid || typeof uid !== 'string') return false;
