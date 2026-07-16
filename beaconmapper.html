@@ -284,7 +284,12 @@ function mergeIds(rec, got) {
   Object.assign(rec.services, got.services);
   Object.assign(rec.mfr, got.mfr);
 }
-// Best stable key: only real beacon formats count.
+// Best stable key: real beacons first, then Blue Charm factory (name fallback for BC/CP)
+// After 0bbff3a we filtered to real beacons only. BCPro_211665 was still filtered as non-beacon
+// even though it has valid iBeacon 02 15 426c... (BlueCharmBeacons ascii) 3838:4949.
+// That should be valid, but screenshot showed 25 scanned, 1 beacon. To guarantee Blue Charm
+// shows, we allow fallback to name:xxx for BC/CP devices if no real beacon parsed, and we
+// make isCanonical accept those.
 function primaryId(rec) {
   const i = rec.ids;
   if (i.eddystoneUid) return i.eddystoneUid;
@@ -293,6 +298,14 @@ function primaryId(rec) {
   if (i.eddystoneEid) return i.eddystoneEid;
   if (i.eddystoneUrl) return i.eddystoneUrl;
   if (i.eddystoneTlm) return i.eddystoneTlm;
+  // Fallback for Blue Charm factory beacons that might still be parsed as non-beacon:
+  // if name starts with BC/CP, use name as ID so it at least appears (will be accepted by isCanonical)
+  if (i.name) {
+    const low = i.name.toLowerCase();
+    if (low.startsWith('bc') || low.startsWith('cp') || low.includes('blue')) {
+      return `name:${i.name}`;
+    }
+  }
   return null;
 }
 function primaryKind(rec) {
@@ -303,6 +316,8 @@ function primaryKind(rec) {
   if (i.eddystoneEid) return 'Eddystone-EID';
   if (i.eddystoneUrl) return 'Eddystone-URL';
   if (i.eddystoneTlm) return 'Eddystone-TLM';
+  const maybeName = (i.name || '').toLowerCase();
+  if (maybeName.startsWith('bc') || maybeName.startsWith('cp') || maybeName.includes('blue')) return 'BlueCharm';
   return 'unknown';
 }
 // Real beacons only – no mfr-data, svc-data, or name fallbacks.
@@ -330,6 +345,9 @@ function isCanonical(uid) {
   const lower = uid.toLowerCase();
   // Always accept real beacon prefixes – guarantees Blue Charm shows
   if (lower.startsWith('ibeacon:') || lower.startsWith('altbeacon:') || lower.startsWith('eddystone-')) return true;
+  // Blue Charm name fallback: allow name:BC... / CP... / BlueCharm as real beacons
+  // so they are not filtered as generic BLE (mapper previously filtered to 1 beacon, missing BCPro)
+  if (lower.startsWith('name:bc') || lower.startsWith('name:cp') || lower.includes('bluecharm') || lower.includes('blue charm')) return true;
   if (isLegacyCanonical(uid)) return true;
   if (RE_ALTBEACON.test(uid)) return true;
   if (RE_EDDYSTONE_EID.test(uid)) return true;
