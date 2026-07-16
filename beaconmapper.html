@@ -535,35 +535,45 @@ function renderScanList() {
   // Only real beacons pass this mapping – non-beacon BLE peripherals are dropped here.
   // Debug: log all discovered for Blue Charm troubleshooting
   console.log(`[${VERSION}] allDiscovered`, allDiscovered.length, allDiscovered.map(({rec})=>({name:rec.ids.name||rec.name, pid:primaryId(rec), rssi:rec.rssi, ids:Object.keys(rec.ids)})));
-  let rows = allDiscovered
-    .map(({ devId, rec }) => {
-      const pid = primaryId(rec);
-      if (!pid) {
-        console.log(`[${VERSION}] filtered non-beacon`, rec.ids.name||'no-name', rec);
-        return null;
-      }
-      const conv = getConversions(pid);
-      return { rec, pid, conv, devId };
-    })
-    .filter(x => {
-      if (!x) return false;
-      const { rec, pid } = x;
-      if (!pid) return false;
-      if (have.has(pid)) {
-        console.log(`[${VERSION}] filtered have.has`, pid);
-        return false;
-      }
-      if (rec.rssi < MIN_RSSI) {
-        console.log(`[${VERSION}] filtered rssi`, pid, rec.rssi);
-        return false;
-      }
-      if (!isRealBeaconId(pid)) {
-        console.log(`[${VERSION}] filtered isRealBeaconId false`, pid, "isCanonical", isCanonical(pid));
-        return false;
-      }
-      return true;
-    });
-  console.log(`[${VERSION}] rows after filter`, rows.length, rows.map(r=>r.pid));
+  // Build list with beacon detection, but also keep non-beacon Blue Charm devices (CP28, BCPro) visible
+  let allRows = allDiscovered.map(({ devId, rec }) => {
+    const pid = primaryId(rec);
+    const conv = pid ? getConversions(pid) : {};
+    // Check if this looks like a Blue Charm beacon (name starts with BC/CP or iBeacon with BlueCharmBeacons ascii)
+    const name = (rec.ids.name||'').toLowerCase();
+    const isBlueCharmName = name.startsWith('bc') || name.startsWith('cp') || name.includes('blue');
+    // For Blue Charm, accept even if primaryId null (factory format) – create synthetic pid from name if needed
+    let finalPid = pid;
+    let isBeacon = !!pid && isRealBeaconId(pid);
+    if (!isBeacon && isBlueCharmName) {
+      // Force Blue Charm to be considered beacon for legacy support (real beacons only, but include Blue Charm multi-beacons)
+      finalPid = pid || `name:${rec.ids.name||'unknown'}`;
+      isBeacon = true;
+      console.log(`[${VERSION}] forcing Blue Charm as beacon`, finalPid, rec.ids.name);
+    }
+    return { rec, pid: finalPid, conv, devId, isBeacon, origPid: pid };
+  });
+
+  let beaconRows = allRows.filter(r=>r.isBeacon).filter(x=>{
+    if (!x.pid) return false;
+    if (have.has(x.pid)) {
+      console.log(`[${VERSION}] filtered have.has`, x.pid);
+      return false;
+    }
+    if (x.rec.rssi < MIN_RSSI) {
+      console.log(`[${VERSION}] filtered rssi`, x.pid, x.rec.rssi);
+      return false;
+    }
+    if (!isRealBeaconId(x.pid) && !x.pid.toLowerCase().startsWith('name:bc') && !x.pid.toLowerCase().startsWith('name:cp')) {
+      // Allow name:bc/cp as beacon even if isRealBeaconId says false (for Blue Charm)
+      console.log(`[${VERSION}] filtered isRealBeaconId false`, x.pid, "isCanonical", isCanonical(x.pid));
+      return false;
+    }
+    return true;
+  });
+  let rows = beaconRows;
+  let nonBeaconRows = allRows.filter(r=>!r.isBeacon);
+  console.log(`[${VERSION}] rows after filter`, rows.length, rows.map(r=>r.pid), "non-beacon", nonBeaconRows.length);
 
   // Stable sort
   if (sortMode === 'rssi') {
