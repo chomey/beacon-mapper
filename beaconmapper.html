@@ -89,6 +89,7 @@
   </select>
   <label for="name-filter" style="margin-left:12px">Name filter:</label>
   <input id="name-filter" placeholder="e.g. WN-" title="Show only name-based beacons whose name contains this text. Leave blank to show every named device." style="font:inherit;padding:8px 10px;border:1px solid #ccd0d5;border-radius:8px;width:110px">
+  <label style="margin-left:12px" title="Show every discovered BLE device, including ones with no name or beacon payload (keyed by device id). Uncheck to show only decoded/named beacons."><input type="checkbox" id="show-all"> Show all devices</label>
   <span class="hint" id="decode-hint">Shows raw IDs + converted equivalents</span>
 </div>
 <div id="unsupported" class="banner" style="display:none">
@@ -111,7 +112,7 @@
 <script>
 // ---- config knobs -----------------------------------------------------------
 // Venue fallback center (used only if GPS is unavailable). Tune to your building.
-const VERSION = "system-name-v5 · name-based (System-frame) beacons + name filter · no fabrication";
+const VERSION = "show-all-v6 · name-based beacons + name filter + Show-all-devices toggle";
 const DEFAULT_CENTER = [37.48412, -122.14993];
 const THUMB_DELTA = 0.0016;          // thumbnail bbox half-span in degrees (~zoom level)
 const EDDYSTONE_SVC = '0000feaa-0000-1000-8000-00805f9b34fb';
@@ -129,6 +130,13 @@ function nameMatchesFilter(name) {
   const f = nameFilter.trim().toLowerCase();
   return f ? name.toLowerCase().includes(f) : true;   // blank filter = accept any named device
 }
+// "Show all devices": render every discovered BLE device (even ones with no name
+// and no beacon payload — common on macOS/iOS Web Bluetooth, where the name/service
+// data is stripped at the API layer). Such devices are keyed by their stable opaque
+// device.id so you can still map them by signal strength. Default ON.
+const SHOW_ALL_KEY = 'beacon_mapper_show_all';
+let showAll = (() => { try { return localStorage.getItem(SHOW_ALL_KEY) !== '0'; } catch { return true; } })();
+function saveShowAll() { try { localStorage.setItem(SHOW_ALL_KEY, showAll ? '1' : '0'); } catch {} }
 console.log("beacon-mapper", VERSION, "loaded");
 const IMG = (minLng,minLat,maxLng,maxLat) =>
   'https://server.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/export' +
@@ -518,7 +526,17 @@ function renderScanList() {
   });
   let rows = beaconRows;
   let nonBeaconRows = allRows.filter(r => !r.isBeacon);
-  console.log(`[${VERSION}] discovered=${allDiscovered.length} beacons=${rows.length} filter="${nameFilter}"`, rows.map(r => r.pid));
+  // Show-all: also surface devices with no name and no beacon payload, keyed by
+  // their stable opaque device.id, so nothing is filtered out. Lets you map a
+  // beacon by signal even when the platform strips its name/payload.
+  if (showAll) {
+    const extras = nonBeaconRows
+      .filter(x => x.rec.rssi >= MIN_RSSI)
+      .map(x => ({ rec: x.rec, pid: 'dev:' + x.rec.deviceId, conv: {}, devId: x.devId, isBeacon: false }))
+      .filter(x => !have.has(x.pid));
+    rows = rows.concat(extras);
+  }
+  console.log(`[${VERSION}] discovered=${allDiscovered.length} shown=${rows.length} showAll=${showAll} filter="${nameFilter}"`, rows.map(r => r.pid));
 
   // Stable sort
   if (sortMode === 'rssi') {
@@ -565,7 +583,7 @@ function stopScan() {
 // ---- location + name step ---------------------------------------------------
 function selectBeacon(rec) {
   stopScan();
-  pending = { uid: primaryId(rec), ids: rec.ids, services: rec.services, mfr: rec.mfr, lat: DEFAULT_CENTER[0], lng: DEFAULT_CENTER[1], alt: 0 };
+  pending = { uid: primaryId(rec) || ('dev:' + rec.deviceId), ids: rec.ids, services: rec.services, mfr: rec.mfr, lat: DEFAULT_CENTER[0], lng: DEFAULT_CENTER[1], alt: 0 };
   showModal('Set location', `
     <div class="hint" style="margin-bottom:8px">Drag the pin (or tap the map) to where the beacon is. Override GPS if it's off.</div>
     <div id="editmap"></div>
@@ -660,6 +678,16 @@ if (nameFilterInput) {
   nameFilterInput.oninput = (e) => {
     nameFilter = e.target.value;
     saveNameFilter();
+    const modal = document.getElementById('modal');
+    if (modal && modal.classList.contains('open')) renderScanList();
+  };
+}
+const showAllInput = document.getElementById('show-all');
+if (showAllInput) {
+  showAllInput.checked = showAll;
+  showAllInput.onchange = (e) => {
+    showAll = e.target.checked;
+    saveShowAll();
     const modal = document.getElementById('modal');
     if (modal && modal.classList.contains('open')) renderScanList();
   };
