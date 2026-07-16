@@ -177,12 +177,19 @@ function extractIds(event) {
     else if (t === 0x20 && eddy.byteLength >= 14) out.eddystoneTlm = `eddystone-tlm:${hex8(eddy, 2, Math.min(12, eddy.byteLength-2))}`;
     else if (t === 0x30 && eddy.byteLength >= 10) out.eddystoneEid = `eddystone-eid:${hex8(eddy, 2, 8)}`;
   }
-  const apple = event.manufacturerData && event.manufacturerData.get(0x004c);
-  if (apple && apple.byteLength >= 23 && apple.getUint8(0) === 0x02 && apple.getUint8(1) === 0x15) {
-    const h = hex8(apple, 2, 16);
-    out.ibeacon = `ibeacon:${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}:${apple.getUint16(18, false)}:${apple.getUint16(20, false)}`;
+  // iBeacon can appear under any company ID (004C Apple is common, but 4458 CP, 0006, etc also used)
+  if (event.manufacturerData) {
+    for (const [, dv] of event.manufacturerData) {
+      if (dv && dv.byteLength >= 23 && dv.getUint8(0) === 0x02 && dv.getUint8(1) === 0x15) {
+        const h = hex8(dv, 2, 16);
+        const major = dv.getUint16(18, false);
+        const minor = dv.getUint16(20, false);
+        out.ibeacon = `ibeacon:${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}:${major}:${minor}`;
+        break;
+      }
+    }
   }
-  // AltBeacon can appear under any company ID, not just Apple's. Scan all mfr entries for BE AC prefix.
+  // AltBeacon can appear under any company ID
   if (event.manufacturerData) {
     for (const [, dv] of event.manufacturerData) {
       const ab = parseAltBeacon(dv);
