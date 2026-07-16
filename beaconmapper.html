@@ -67,11 +67,12 @@
 </head>
 <body>
 <header>
-  <h1>WorldNotes Beacon Mapper</h1>
+  <h1>WorldNotes Beacon Mapper <span style="font-size:10px;color:#8a8d91" id="ver"></span></h1>
   <button id="add">+ Add beacon</button>
   <button id="show-json" class="secondary">JSON</button>
   <span class="count" id="count">0 beacons</span>
 </header>
+<script>document.addEventListener('DOMContentLoaded',()=>{const el=document.getElementById('ver');if(el&&typeof VERSION!=='undefined')el.textContent=VERSION;});</script>
 <div class="decode-bar">
   <label for="decode-mode">Decode as:</label>
   <select id="decode-mode">
@@ -108,11 +109,13 @@
 <script>
 // ---- config knobs -----------------------------------------------------------
 // Venue fallback center (used only if GPS is unavailable). Tune to your building.
+const VERSION = "bc-fix-v4 + permissive isCanonical + BC/CP name fallback – commit b14496f+";
 const DEFAULT_CENTER = [37.48412, -122.14993];
 const THUMB_DELTA = 0.0016;          // thumbnail bbox half-span in degrees (~zoom level)
 const EDDYSTONE_SVC = '0000feaa-0000-1000-8000-00805f9b34fb';
 const STORE_KEY = 'beacon_mapper_v1';
-const MIN_RSSI = -80;                 // hide beacons weaker than this dBm; ~-49 when right next to one. Raise to -70 to be stricter.
+const MIN_RSSI = -90;                 // permissive for Blue Charm: was -80, now -90 to show more beacons (BCPro  -45, CP28 -55)
+console.log("beacon-mapper", VERSION, "loaded");
 const IMG = (minLng,minLat,maxLng,maxLat) =>
   'https://server.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/export' +
   `?bbox=${minLng},${minLat},${maxLng},${maxLat}&bboxSR=4326&size=300,240&format=png&f=image`;
@@ -530,10 +533,15 @@ function renderScanList() {
   const allDiscovered = [...discovered.entries()].map(([devId, rec]) => ({ devId, rec }));
 
   // Only real beacons pass this mapping – non-beacon BLE peripherals are dropped here.
+  // Debug: log all discovered for Blue Charm troubleshooting
+  console.log(`[${VERSION}] allDiscovered`, allDiscovered.length, allDiscovered.map(({rec})=>({name:rec.ids.name||rec.name, pid:primaryId(rec), rssi:rec.rssi, ids:Object.keys(rec.ids)})));
   let rows = allDiscovered
     .map(({ devId, rec }) => {
       const pid = primaryId(rec);
-      if (!pid) return null; // not a beacon (e.g. mfr-data only)
+      if (!pid) {
+        console.log(`[${VERSION}] filtered non-beacon`, rec.ids.name||'no-name', rec);
+        return null;
+      }
       const conv = getConversions(pid);
       return { rec, pid, conv, devId };
     })
@@ -541,11 +549,21 @@ function renderScanList() {
       if (!x) return false;
       const { rec, pid } = x;
       if (!pid) return false;
-      if (have.has(pid)) return false;
-      if (rec.rssi < MIN_RSSI) return false;
-      if (!isRealBeaconId(pid)) return false;
+      if (have.has(pid)) {
+        console.log(`[${VERSION}] filtered have.has`, pid);
+        return false;
+      }
+      if (rec.rssi < MIN_RSSI) {
+        console.log(`[${VERSION}] filtered rssi`, pid, rec.rssi);
+        return false;
+      }
+      if (!isRealBeaconId(pid)) {
+        console.log(`[${VERSION}] filtered isRealBeaconId false`, pid, "isCanonical", isCanonical(pid));
+        return false;
+      }
       return true;
     });
+  console.log(`[${VERSION}] rows after filter`, rows.length, rows.map(r=>r.pid));
 
   // Stable sort
   if (sortMode === 'rssi') {
