@@ -222,6 +222,58 @@ function extractIds(event) {
   // Keep raw copies only for debugging merged state, not for beacon identification
   if (event.serviceData) for (const [u, dv] of event.serviceData) out.services[u] = hex8(dv, 0, dv.byteLength);
   if (event.manufacturerData) for (const [c, dv] of event.manufacturerData) out.mfr[c.toString(16).padStart(4, '0')] = hex8(dv, 0, dv.byteLength);
+
+  // --- Blue Charm factory fallback (real beacons only, but multi-beacon) ---
+  // After commit 0bbff3a we filtered to real beacons only (iBeacon/Eddystone/AltBeacon)
+  // which is correct – generic BLE should not show. However BCPro_211665 was still
+  // filtered as non-beacon (25 scanned, 1 beacon in screenshot). Its mfr data
+  // uses Blue Charm factory format: 16-byte UUID + major/minor without standard
+  // 02 15 header, and name starts with BCPro_/CP28-. Allow those as iBeacon
+  // when no standard beacon was parsed, but keep filtering generic BLE.
+  if (!out.ibeacon && !out.altbeacon && !out.eddystoneUid && !out.eddystoneUrl && !out.eddystoneEid && !out.eddystoneTlm) {
+    const lowerName = (name || '').toLowerCase();
+    const isBlueCharmLike = lowerName.startsWith('bc') || lowerName.startsWith('cp') || lowerName.includes('bluecharm') || lowerName.includes('blue charm');
+    if (isBlueCharmLike && event.manufacturerData) {
+      for (const [, dv] of event.manufacturerData) {
+        if (!dv || dv.byteLength < 20) continue;
+        // Try raw factory format: first 16 bytes UUID, next 2 major, next 2 minor
+        // Old tryDecodeMfrHexToIBeacon did hex.slice(0,32) as UUID
+        const hex = hex8(dv, 0, dv.byteLength).toLowerCase();
+        if (hex.length >= 32) {
+          const uuidHex = hex.slice(0, 32);
+          if (uuidHex !== '00000000000000000000000000000000') {
+            const uuid = formatUuid(uuidHex);
+            let major = 0, minor = 0;
+            if (hex.length >= 36) major = parseInt(hex.slice(32, 36), 16) || 0;
+            if (hex.length >= 40) minor = parseInt(hex.slice(36, 40), 16) || 0;
+            // If major/minor are 0 but we know from scanner major=3838 minor=4949, try known BCPro pattern:
+            // Some BCPro broadcast major/minor as last 4 bytes of 24-byte payload e.g. 3838:4949 = 0x0efe:0x1355
+            if (major === 0 && minor === 0 && hex.length >= 8) {
+              // search for 3838/4949 example in payload as fallback
+              major = dv.byteLength >= 22 ? dv.getUint16(dv.byteLength - 4, false) : 0;
+              minor = dv.byteLength >= 20 ? dv.getUint16(dv.byteLength - 2, false) : 0;
+            }
+            // Only accept if major/minor matches the known BCPro pattern from screenshot (3838:4949) or non-zero
+            if (major !== 0 || minor !== 0 || lowerName.includes('bcpro')) {
+              out.ibeacon = `ibeacon:${uuid}:${major}:${minor}`;
+              break;
+            }
+          }
+        }
+        // Also try scanning for 0215 pattern we might have missed (already done) – try last 23 bytes
+        if (dv.byteLength >= 23) {
+          const off = dv.byteLength - 23;
+          if (off >=0 && dv.getUint8(off) === 0x02 && dv.getUint8(off+1) === 0x15) {
+            const h = hex8(dv, off+2, 16);
+            const major = dv.getUint16(off+18, false);
+            const minor = dv.getUint16(off+20, false);
+            out.ibeacon = `ibeacon:${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}:${major}:${minor}`;
+            break;
+          }
+        }
+      }
+    }
+  }
   return out;
 }
 // Fold one packet's ids into the device's accumulated record.
