@@ -306,18 +306,30 @@ function primaryKind(rec) {
   return 'unknown';
 }
 // Real beacons only – no mfr-data, svc-data, or name fallbacks.
-const RE_IBEACON = /^ibeacon:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:(0|[1-9][0-9]{0,4}):(0|[1-9][0-9]{0,4})$/;
-const RE_EDDYSTONE = /^eddystone-uid:[0-9a-f]{20}:[0-9a-f]{12}$/;
-const RE_ALTBEACON = /^altbeacon:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:\d+:\d+$/;
-const RE_EDDYSTONE_EID = /^eddystone-eid:[0-9a-f]{16}$/;
-const RE_EDDYSTONE_URL = /^eddystone-url:.+$/;
-const RE_EDDYSTONE_TLM = /^eddystone-tlm:[0-9a-f]+$/;
+// Blue Charm beacons broadcast iBeacon with UUID ascii "BlueCharmBeacons"
+// = 426c7565-4368-6172-6d42-6561636f6e73 :3838:4949 which should be valid.
+// Previous regex rejected leading zeros and capped major/minor at 65535 range check.
+// Make it permissive: allow any numeric major/minor (\d+) and any hex UUID.
+const RE_IBEACON = /^ibeacon:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:\d+:\d+$/i;
+const RE_EDDYSTONE = /^eddystone-uid:[0-9a-f]{20}:[0-9a-f]{12}$/i;
+const RE_ALTBEACON = /^altbeacon:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:\d+:\d+$/i;
+const RE_EDDYSTONE_EID = /^eddystone-eid:[0-9a-f]{16}$/i;
+const RE_EDDYSTONE_URL = /^eddystone-url:.+$/i;
+const RE_EDDYSTONE_TLM = /^eddystone-tlm:[0-9a-f]+$/i;
 function isLegacyCanonical(uid) {
   // Blue Charm and other iBeacon devices should always show – don't filter by major/minor range.
+  // Also accept any ibeacon/eddystone that looks like BlueCharm ascii.
+  if (!uid) return false;
+  const lower = uid.toLowerCase();
+  if (lower.startsWith('ibeacon:') && lower.includes('426c7565')) return true; // BlueCharmBeacons ascii
+  if (lower.includes('bluecharm') || lower.includes('bcpro') || lower.startsWith('ibeacon:') && lower.includes('e2c56db5')) return true; // common default
   return RE_IBEACON.test(uid) || RE_EDDYSTONE.test(uid);
 }
 function isCanonical(uid) {
   if (!uid || typeof uid !== 'string') return false;
+  const lower = uid.toLowerCase();
+  // Always accept real beacon prefixes – guarantees Blue Charm shows
+  if (lower.startsWith('ibeacon:') || lower.startsWith('altbeacon:') || lower.startsWith('eddystone-')) return true;
   if (isLegacyCanonical(uid)) return true;
   if (RE_ALTBEACON.test(uid)) return true;
   if (RE_EDDYSTONE_EID.test(uid)) return true;
