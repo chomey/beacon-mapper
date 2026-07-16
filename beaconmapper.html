@@ -520,49 +520,49 @@ async function openAdd() {
   }
 }
 function onAdvert(event) {
-  const id = (event.device && event.device.id) || 'anon';
-  const existing = discovered.get(id);
-  const rec = existing || { rssi: event.rssi, ids: {}, services: {}, mfr: {}, firstSeen: Date.now(), name: '' };
+  const devId = (event.device && event.device.id) || 'anon-' + Math.random().toString(16).slice(2);
+  const existing = discovered.get(devId);
+  const rec = existing || { deviceId: devId, rssi: event.rssi, ids: {}, services: {}, mfr: {}, firstSeen: Date.now(), name: '' };
   if (!existing) rec.firstSeen = Date.now();
   rec.rssi = event.rssi;
+  rec.deviceId = devId; // stable key that never changes
   mergeIds(rec, extractIds(event));
   if (rec.ids.name && !rec.name) rec.name = rec.ids.name;
-  discovered.set(id, rec);
-  if (!scanRenderPending) { scanRenderPending = true; setTimeout(renderScanList, 400); }
+  discovered.set(devId, rec);
+  if (!scanRenderPending) { scanRenderPending = true; setTimeout(renderScanList, 800); } // 800ms debounce reduces flicker
 }
 function renderScanList() {
   scanRenderPending = false;
   const el = document.getElementById('scanlist');
   if (!el) return;
   const have = new Set(beacons.map(b => b.uid));
-  const allDiscovered = [...discovered.values()];
+  const allDiscovered = [...discovered.entries()].map(([devId, rec]) => ({ devId, rec }));
   let rows = allDiscovered
-    .map(rec => {
+    .map(({ devId, rec }) => {
       let pid = primaryId(rec);
-      // If still no ID (empty advert), use a placeholder so it still shows for debugging
+      // Stable fallback: use deviceId so key never changes even if primaryId is initially null
       if (!pid) {
-        const fallback = rec.ids.name ? `name:${rec.ids.name}` : `unknown:${rec.firstSeen}`;
-        pid = fallback;
+        pid = `device:${devId.slice(0, 8)}`;
       }
       const conv = getConversions(pid);
       const rawJoined = (Object.values(rec.services).join(' ') + ' ' + Object.values(rec.mfr).join(' ') + ' ' + Object.values(rec.ids).join(' ')).toLowerCase();
       const isTestRaw = rawJoined.includes('00000000000000000067') || rawJoined.includes('000000000001') || pid.includes('00000000000000000067');
-      return { rec, pid, conv, isTestRaw, rawJoined };
+      return { rec, pid, conv, isTestRaw, rawJoined, devId };
     })
     .filter(({ rec, pid }) => {
-      // Don't filter by have for test beacons - always show 67:1 even if saved, so user can see it
       const isTest = pid.includes('00000000000000000067') || pid.includes('00000000-0000-0000-0067-');
       if (isTest) return rec.rssi >= MIN_RSSI;
       return !have.has(pid) && rec.rssi >= MIN_RSSI;
     });
 
-  // Sort: default is first-seen (stable, no jumping), ID is also stable, RSSI jumps but shows closest first
+  // Stable sort: by firstSeen (no jumping) is default. Use deviceId as secondary stable key.
   if (sortMode === 'rssi') {
-    rows.sort((a, b) => b.rec.rssi - a.rec.rssi || a.pid.localeCompare(b.pid));
+    rows.sort((a, b) => b.rec.rssi - a.rec.rssi || a.rec.firstSeen - b.rec.firstSeen);
   } else if (sortMode === 'id') {
-    rows.sort((a, b) => a.pid.localeCompare(b.pid));
+    rows.sort((a, b) => a.pid.localeCompare(b.pid) || a.rec.firstSeen - b.rec.firstSeen);
   } else {
-    rows.sort((a, b) => a.rec.firstSeen - b.rec.firstSeen);
+    // first-seen is the most stable - deviceId never changes, pid may upgrade from unknown->mfr->ibeacon
+    rows.sort((a, b) => a.rec.firstSeen - b.rec.firstSeen || a.devId.localeCompare(b.devId));
   }
 
   // Show counts
