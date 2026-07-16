@@ -90,6 +90,8 @@
   <label for="name-filter" style="margin-left:12px">Name filter:</label>
   <input id="name-filter" placeholder="e.g. WN-" title="Show only name-based beacons whose name contains this text. Leave blank to show every named device." style="font:inherit;padding:8px 10px;border:1px solid #ccd0d5;border-radius:8px;width:110px">
   <label style="margin-left:12px" title="Show every discovered BLE device, including ones with no name or beacon payload (keyed by device id). Uncheck to show only decoded/named beacons."><input type="checkbox" id="show-all"> Show all devices</label>
+  <label for="min-rssi" style="margin-left:12px">Min signal: <span id="min-rssi-val">-90</span> dBm</label>
+  <input type="range" id="min-rssi" min="-100" max="-30" step="1" value="-90" title="Hide devices weaker than this. Drag toward -30 and hold your beacon against the phone to isolate it from the crowd.">
   <span class="hint" id="decode-hint">Shows raw IDs + converted equivalents</span>
 </div>
 <div id="unsupported" class="banner" style="display:none">
@@ -112,12 +114,17 @@
 <script>
 // ---- config knobs -----------------------------------------------------------
 // Venue fallback center (used only if GPS is unavailable). Tune to your building.
-const VERSION = "show-all-v7 · shows every device; scan hint reports Show-all state";
+const VERSION = "proximity-v8 · Show-all + adjustable Min-signal slider to isolate a beacon";
 const DEFAULT_CENTER = [37.48412, -122.14993];
 const THUMB_DELTA = 0.0016;          // thumbnail bbox half-span in degrees (~zoom level)
 const EDDYSTONE_SVC = '0000feaa-0000-1000-8000-00805f9b34fb';
 const STORE_KEY = 'beacon_mapper_v1';
-const MIN_RSSI = -90;                 // permissive: show weak beacons too (BCPro ~-45, CP28 ~-55)
+const MIN_RSSI = -90;                 // default signal floor
+// Adjustable proximity threshold. Drag toward 0 (e.g. -40) and hold your beacon
+// against the phone to isolate it from all the other BLE noise in the room.
+const MIN_RSSI_KEY = 'beacon_mapper_min_rssi';
+let minRssi = (() => { try { const v = parseInt(localStorage.getItem(MIN_RSSI_KEY), 10); return Number.isFinite(v) ? v : MIN_RSSI; } catch { return MIN_RSSI; } })();
+function saveMinRssi() { try { localStorage.setItem(MIN_RSSI_KEY, String(minRssi)); } catch {} }
 // Name filter for name-based (System-frame) beacons. iOS/Web Bluetooth strips the
 // iBeacon/Eddystone payload, but the Complete Local Name still crosses – so we key
 // name-based beacons on their name. Set this to your fleet's name prefix (e.g. "WN-")
@@ -517,7 +524,7 @@ function renderScanList() {
   let beaconRows = allRows.filter(r => r.isBeacon).filter(x => {
     if (!x.pid) return false;
     if (have.has(x.pid)) return false;
-    if (x.rec.rssi < MIN_RSSI) return false;
+    if (x.rec.rssi < minRssi) return false;
     // Name-based (System-frame / connectable named) beacons: apply the optional
     // name filter so the list shows just your fleet, not every named BLE device
     // in range. Real payload beacons (iBeacon/Eddystone/AltBeacon) are never name-filtered.
@@ -531,7 +538,7 @@ function renderScanList() {
   // beacon by signal even when the platform strips its name/payload.
   if (showAll) {
     const extras = nonBeaconRows
-      .filter(x => x.rec.rssi >= MIN_RSSI)
+      .filter(x => x.rec.rssi >= minRssi)
       .map(x => ({ rec: x.rec, pid: 'dev:' + x.rec.deviceId, conv: {}, devId: x.devId, isBeacon: false }))
       .filter(x => !have.has(x.pid));
     rows = rows.concat(extras);
@@ -689,6 +696,19 @@ if (showAllInput) {
   showAllInput.onchange = (e) => {
     showAll = e.target.checked;
     saveShowAll();
+    const modal = document.getElementById('modal');
+    if (modal && modal.classList.contains('open')) renderScanList();
+  };
+}
+const minRssiInput = document.getElementById('min-rssi');
+const minRssiVal = document.getElementById('min-rssi-val');
+if (minRssiInput) {
+  minRssiInput.value = String(minRssi);
+  if (minRssiVal) minRssiVal.textContent = String(minRssi);
+  minRssiInput.oninput = (e) => {
+    minRssi = parseInt(e.target.value, 10);
+    if (minRssiVal) minRssiVal.textContent = String(minRssi);
+    saveMinRssi();
     const modal = document.getElementById('modal');
     if (modal && modal.classList.contains('open')) renderScanList();
   };
