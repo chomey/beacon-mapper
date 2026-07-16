@@ -1,1 +1,1 @@
-https://rawcdn.githack.com/chomey/beacon-mapper/d5010c74058e8962939c8f286678f9a2d5e7f540/beaconmapper.html
+https://rawcdn.githack.com/chomey/beacon-mapper/27eb1d06542fa5a87bfe43544053ab6475a221b8/beaconmapper.html
