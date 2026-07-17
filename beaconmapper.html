@@ -114,7 +114,7 @@
 <script>
 // ---- config knobs -----------------------------------------------------------
 // Venue fallback center (used only if GPS is unavailable). Tune to your building.
-const VERSION = "proximity-v9 · scan controls (Min-signal/Show-all/Sort) INSIDE the scan sheet";
+const VERSION = "system-decode-v10 · decodes KKM System frame (FEAA 0x22 / mfr 0x0A53) → system:MAC";
 const DEFAULT_CENTER = [37.48412, -122.14993];
 const THUMB_DELTA = 0.0016;          // thumbnail bbox half-span in degrees (~zoom level)
 const EDDYSTONE_SVC = '0000feaa-0000-1000-8000-00805f9b34fb';
@@ -190,6 +190,8 @@ function parseAltBeacon(dv) {
 function hex8(dv, start, len) {
   let s = ''; for (let i = 0; i < len; i++) s += dv.getUint8(start + i).toString(16).padStart(2, '0'); return s;
 }
+// KKM/Blue Charm "System" frame embeds the 6-byte MAC at a fixed offset. Read it as a MAC string.
+function macFromDv(dv, off) { const p = []; for (let i = 0; i < 6; i++) p.push(dv.getUint8(off + i).toString(16).padStart(2, '0')); return p.join(':'); }
 function parseEddystoneUrl(dv) {
   if (dv.byteLength < 3) return null;
   const scheme = ['http://www.', 'https://www.', 'http://', 'https://'][dv.getUint8(2)] ?? '';
@@ -208,6 +210,8 @@ function extractIds(event) {
     else if (t === 0x10) { const url = parseEddystoneUrl(eddy); if (url) out.eddystoneUrl = `eddystone-url:${url}`; }
     else if (t === 0x20 && eddy.byteLength >= 14) out.eddystoneTlm = `eddystone-tlm:${hex8(eddy, 2, Math.min(12, eddy.byteLength-2))}`;
     else if (t === 0x30 && eddy.byteLength >= 10) out.eddystoneEid = `eddystone-eid:${hex8(eddy, 2, 8)}`;
+    // KKM "System" frame carried on Eddystone FEAA: [0x22][model][battery][MAC 6][fw 2]
+    else if (t === 0x22 && eddy.byteLength >= 9) out.system = `system:${macFromDv(eddy, 3)}`;
   }
   // iBeacon can appear under any company ID (004C Apple is common, but 4458 etc also used)
   // Real beacons only: iBeacon, Eddystone-UID, AltBeacon, EID/URL/TLM.
@@ -249,6 +253,11 @@ function extractIds(event) {
       if (ab0) { out.altbeacon = ab0; break; }
     }
   }
+  // KKM "System" frame can also ride on KKM manufacturer id 0x0A53 (type 0x22): [0x22][model][battery][MAC 6][fw 2]
+  if (!out.system && event.manufacturerData) {
+    const kkm = event.manufacturerData.get(0x0A53);
+    if (kkm && kkm.byteLength >= 9 && kkm.getUint8(0) === 0x22) out.system = `system:${macFromDv(kkm, 3)}`;
+  }
   const name = event.name || (event.device && event.device.name);
   if (name) out.name = name;
   // Keep raw copies only for debugging merged state, not for beacon identification
@@ -266,7 +275,7 @@ function extractIds(event) {
 }
 // Fold one packet's ids into the device's accumulated record.
 function mergeIds(rec, got) {
-  for (const k of ['eddystoneUid', 'eddystoneUrl', 'eddystoneEid', 'eddystoneTlm', 'ibeacon', 'altbeacon', 'name']) if (got[k]) rec.ids[k] = got[k];
+  for (const k of ['eddystoneUid', 'eddystoneUrl', 'eddystoneEid', 'eddystoneTlm', 'ibeacon', 'altbeacon', 'system', 'name']) if (got[k]) rec.ids[k] = got[k];
   Object.assign(rec.services, got.services);
   Object.assign(rec.mfr, got.mfr);
 }
@@ -284,6 +293,8 @@ function primaryId(rec) {
   if (i.eddystoneEid) return i.eddystoneEid;
   if (i.eddystoneUrl) return i.eddystoneUrl;
   if (i.eddystoneTlm) return i.eddystoneTlm;
+  // KKM/Blue Charm System frame → stable per-device MAC (works even when the name doesn't cross).
+  if (i.system) return i.system;
   // Name-based (System-frame / any connectable named device). On iOS & Android
   // the Complete Local Name crosses even when the iBeacon/Eddystone payload is
   // stripped/denylisted, so the name is the portable cross-platform key. The
@@ -299,6 +310,7 @@ function primaryKind(rec) {
   if (i.eddystoneEid) return 'Eddystone-EID';
   if (i.eddystoneUrl) return 'Eddystone-URL';
   if (i.eddystoneTlm) return 'Eddystone-TLM';
+  if (i.system) return 'System (KKM)';
   if (i.name) return 'Named';
   return 'unknown';
 }
@@ -327,7 +339,9 @@ function isCanonical(uid) {
   const lower = uid.toLowerCase();
   // Real beacon prefixes
   if (lower.startsWith('ibeacon:') || lower.startsWith('altbeacon:') || lower.startsWith('eddystone-')) return true;
-  // Name-based (System-frame / any connectable named device) beacon. The optional
+  // KKM System frame (decoded to a per-device MAC).
+  if (lower.startsWith('system:')) return true;
+  // Name-based (any connectable named device) beacon. The optional
   // name filter in renderScanList narrows which named devices are shown.
   if (lower.startsWith('name:')) return true;
   if (isLegacyCanonical(uid)) return true;
@@ -771,6 +785,10 @@ if (minRssiInput) {
   // Eddystone-URL
   r = mk(); mergeIds(r, extractIds({ serviceData: new Map([[EDDYSTONE_SVC, dvOf([0x10,0x00,0x03, 0x67,0x6f,0x6f,0x2e,0x67,0x6c])]]) }));
   chk(primaryId(r) && primaryId(r).startsWith('eddystone-url:'), 'eddystone-url', primaryId(r));
+  // KKM System frame on FEAA (0x22): [0x22][model][battery][MAC 6][fw 2] → system:MAC (real BCPro_211665 bytes)
+  r = mk(); mergeIds(r, extractIds({ serviceData: new Map([[EDDYSTONE_SVC, dvOf([0x22,0x32,0x72,0xdd,0x34,0x02,0x0c,0x06,0xbc,0x06,0x42])]]) }));
+  chk(primaryId(r) === 'system:dd:34:02:0c:06:bc', 'kkm-system-feaa', primaryId(r));
+  chk(isCanonical('system:dd:34:02:0c:06:bc'), 'accept-system', true);
   // Named device is now recognized as a name-based (System-frame) beacon
   r = mk(); mergeIds(r, extractIds({ name: 'RandomDevice' }));
   chk(primaryId(r) === 'name:RandomDevice', 'name-based-beacon', primaryId(r));
