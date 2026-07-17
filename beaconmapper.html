@@ -114,7 +114,7 @@
 <script>
 // ---- config knobs -----------------------------------------------------------
 // Venue fallback center (used only if GPS is unavailable). Tune to your building.
-const VERSION = "diag-v11 · per-row mfr/svc keys so you can see what actually reaches the browser";
+const VERSION = "diag-v12 · show-all keeps already-saved; hint shows why devices are hidden";
 const DEFAULT_CENTER = [37.48412, -122.14993];
 const THUMB_DELTA = 0.0016;          // thumbnail bbox half-span in degrees (~zoom level)
 const EDDYSTONE_SVC = '0000feaa-0000-1000-8000-00805f9b34fb';
@@ -548,35 +548,21 @@ function renderScanList() {
   // Debug: log all discovered for Blue Charm troubleshooting
   console.log(`[${VERSION}] allDiscovered`, allDiscovered.length, allDiscovered.map(({rec})=>({name:rec.ids.name||rec.name, pid:primaryId(rec), rssi:rec.rssi, ids:Object.keys(rec.ids)})));
   // Build list with beacon detection, but also keep non-beacon Blue Charm devices (CP28, BCPro) visible
-  let allRows = allDiscovered.map(({ devId, rec }) => {
-    const pid = primaryId(rec);
-    const conv = pid ? getConversions(pid) : {};
-    return { rec, pid, conv, devId, isBeacon: !!pid && isRealBeaconId(pid) };
-  });
-
-  let beaconRows = allRows.filter(r => r.isBeacon).filter(x => {
-    if (!x.pid) return false;
-    if (have.has(x.pid)) return false;
-    if (x.rec.rssi < minRssi) return false;
-    // Name-based (System-frame / connectable named) beacons: apply the optional
-    // name filter so the list shows just your fleet, not every named BLE device
-    // in range. Real payload beacons (iBeacon/Eddystone/AltBeacon) are never name-filtered.
-    if (x.pid.toLowerCase().startsWith('name:') && !nameMatchesFilter(x.rec.ids.name)) return false;
+  // Give EVERY discovered device a pid (decoded beacon id, or dev:<id> fallback),
+  // then filter with explicit reasons so the hint can report exactly what's hidden.
+  let hiddenWeak = 0, hiddenSaved = 0, hiddenName = 0, hiddenUndecoded = 0;
+  let rows = allDiscovered.map(({ devId, rec }) => {
+    const real = primaryId(rec);
+    const pid = real || ('dev:' + rec.deviceId);
+    return { rec, devId, pid, conv: real ? getConversions(real) : {}, decoded: !!real, saved: false };
+  }).filter(x => {
+    if (x.rec.rssi < minRssi) { hiddenWeak++; return false; }
+    if (!showAll && !x.decoded) { hiddenUndecoded++; return false; }          // beacons-only mode hides undecoded devices
+    if (x.pid.toLowerCase().startsWith('name:') && !nameMatchesFilter(x.rec.ids.name)) { hiddenName++; return false; }
+    if (have.has(x.pid)) { if (!showAll) { hiddenSaved++; return false; } x.saved = true; }  // show-all keeps already-saved (marked)
     return true;
   });
-  let rows = beaconRows;
-  let nonBeaconRows = allRows.filter(r => !r.isBeacon);
-  // Show-all: also surface devices with no name and no beacon payload, keyed by
-  // their stable opaque device.id, so nothing is filtered out. Lets you map a
-  // beacon by signal even when the platform strips its name/payload.
-  if (showAll) {
-    const extras = nonBeaconRows
-      .filter(x => x.rec.rssi >= minRssi)
-      .map(x => ({ rec: x.rec, pid: 'dev:' + x.rec.deviceId, conv: {}, devId: x.devId, isBeacon: false }))
-      .filter(x => !have.has(x.pid));
-    rows = rows.concat(extras);
-  }
-  console.log(`[${VERSION}] discovered=${allDiscovered.length} shown=${rows.length} showAll=${showAll} filter="${nameFilter}"`, rows.map(r => r.pid));
+  console.log(`[${VERSION}] discovered=${allDiscovered.length} shown=${rows.length} showAll=${showAll} hidden{weak:${hiddenWeak},saved:${hiddenSaved},name:${hiddenName},undecoded:${hiddenUndecoded}}`, rows.map(r => r.pid));
 
   // Stable sort
   if (sortMode === 'rssi') {
@@ -589,19 +575,23 @@ function renderScanList() {
 
   const totalBle = allDiscovered.length;
   const shownCount = rows.length;
-  const filteredCount = totalBle - shownCount;
-
   const modeNote = showAll ? 'Show-all ON — every device' : 'beacons only';
+  const hiddenBits = [];
+  if (hiddenWeak) hiddenBits.push(`${hiddenWeak} too weak`);
+  if (hiddenSaved) hiddenBits.push(`${hiddenSaved} already saved`);
+  if (hiddenName) hiddenBits.push(`${hiddenName} name-filtered`);
+  if (hiddenUndecoded) hiddenBits.push(`${hiddenUndecoded} not a beacon`);
+  const hiddenNote = hiddenBits.length ? ` — hidden: ${hiddenBits.join(', ')}` : '';
   if (rows.length === 0) {
-    el.innerHTML = `<div class="hint">No devices to show (scanned ${totalBle} BLE ${totalBle === 1 ? 'device' : 'devices'}; ${modeNote}).<br>${totalBle === 0 ? 'Nothing is being received — check Bluetooth is on and the scan permission/flag is enabled.' : 'Enable "Show all devices" to list everything, or clear the Name filter.'}</div>`;
+    el.innerHTML = `<div class="hint">No devices to show (scanned ${totalBle} BLE ${totalBle === 1 ? 'device' : 'devices'}; ${modeNote}${hiddenNote}).<br>${totalBle === 0 ? 'Nothing is being received — check Bluetooth is on and the scan permission/flag is enabled.' : 'Lower Min signal, clear the Name filter, or enable Show all devices.'}</div>`;
   } else {
-    el.innerHTML = `<div class="hint">Scanned ${totalBle}, showing ${shownCount} (${modeNote}${filteredCount ? `, ${filteredCount} hidden: too weak / already saved` : ''}). Sorted by ${sortMode === 'id' ? 'ID' : sortMode === 'rssi' ? 'signal' : 'first seen'}. Tap the one you're standing next to.</div>`;
+    el.innerHTML = `<div class="hint">Scanned ${totalBle}, showing ${shownCount} (${modeNote}${hiddenNote}). Sorted by ${sortMode === 'id' ? 'ID' : sortMode === 'rssi' ? 'signal' : 'first seen'}. Tap the one you're standing next to.</div>`;
   }
 
-  rows.forEach(({ rec, pid, conv }) => {
+  rows.forEach(({ rec, pid, conv, saved }) => {
     const row = document.createElement('div');
     row.className = 'scan-row';
-    const label = rec.ids.name ? esc(rec.ids.name) + ' · ' : '';
+    const label = (saved ? '(saved) ' : '') + (rec.ids.name ? esc(rec.ids.name) + ' · ' : '');
     let extra = '';
     if (conv.eddystone && conv.ibeacon && conv.eddystone !== pid && conv.ibeacon !== pid) {
       extra = `<br><span style="color:#1877f2">${esc(conv.eddystone)}</span><br><span style="color:#606770">${esc(conv.ibeacon)}</span>`;
