@@ -114,10 +114,11 @@
 <script>
 // ---- config knobs -----------------------------------------------------------
 // Venue fallback center (used only if GPS is unavailable). Tune to your building.
-const VERSION = "diag-v12 · show-all keeps already-saved; hint shows why devices are hidden";
+const VERSION = "kkm-ext-v13 · decodes KKM 0x2080 ext-data (non-denylisted) → kkm:<MAC tail>";
 const DEFAULT_CENTER = [37.48412, -122.14993];
 const THUMB_DELTA = 0.0016;          // thumbnail bbox half-span in degrees (~zoom level)
 const EDDYSTONE_SVC = '0000feaa-0000-1000-8000-00805f9b34fb';
+const KKM_EXT_SVC = '00002080-0000-1000-8000-00805f9b34fb'; // KKM ext-data (battery + low MAC bytes) — NOT on Android's denylist
 const STORE_KEY = 'beacon_mapper_v1';
 const MIN_RSSI = -90;                 // default signal floor
 // Adjustable proximity threshold. Drag toward 0 (e.g. -40) and hold your beacon
@@ -258,6 +259,13 @@ function extractIds(event) {
     const kkm = event.manufacturerData.get(0x0A53);
     if (kkm && kkm.byteLength >= 9 && kkm.getUint8(0) === 0x22) out.system = `system:${macFromDv(kkm, 3)}`;
   }
+  // KKM "ext data" (service UUID 0x2080): battery + trailing low-MAC bytes. This frame is NOT on
+  // Android's location denylist, so it slips through where the FEAA/iBeacon frames get stripped.
+  // Use the trailing 3 bytes (low MAC) as a stable per-device id so a KKM beacon is identifiable.
+  if (!out.system && event.serviceData) {
+    const ext = event.serviceData.get(KKM_EXT_SVC);
+    if (ext && ext.byteLength >= 4) out.system = `kkm:${hex8(ext, ext.byteLength - 3, 3)}`;
+  }
   const name = event.name || (event.device && event.device.name);
   if (name) out.name = name;
   // Keep raw copies only for debugging merged state, not for beacon identification
@@ -310,7 +318,7 @@ function primaryKind(rec) {
   if (i.eddystoneEid) return 'Eddystone-EID';
   if (i.eddystoneUrl) return 'Eddystone-URL';
   if (i.eddystoneTlm) return 'Eddystone-TLM';
-  if (i.system) return 'System (KKM)';
+  if (i.system) return i.system.startsWith('kkm:') ? 'KKM ext' : 'System (KKM)';
   if (i.name) return 'Named';
   return 'unknown';
 }
@@ -339,8 +347,8 @@ function isCanonical(uid) {
   const lower = uid.toLowerCase();
   // Real beacon prefixes
   if (lower.startsWith('ibeacon:') || lower.startsWith('altbeacon:') || lower.startsWith('eddystone-')) return true;
-  // KKM System frame (decoded to a per-device MAC).
-  if (lower.startsWith('system:')) return true;
+  // KKM System frame (full MAC) / KKM ext-data frame (MAC tail) — both are per-device ids.
+  if (lower.startsWith('system:') || lower.startsWith('kkm:')) return true;
   // Name-based (any connectable named device) beacon. The optional
   // name filter in renderScanList narrows which named devices are shown.
   if (lower.startsWith('name:')) return true;
@@ -786,6 +794,9 @@ if (minRssiInput) {
   r = mk(); mergeIds(r, extractIds({ serviceData: new Map([[EDDYSTONE_SVC, dvOf([0x22,0x32,0x72,0xdd,0x34,0x02,0x0c,0x06,0xbc,0x06,0x42])]]) }));
   chk(primaryId(r) === 'system:dd:34:02:0c:06:bc', 'kkm-system-feaa', primaryId(r));
   chk(isCanonical('system:dd:34:02:0c:06:bc'), 'accept-system', true);
+  // KKM ext-data frame on service 0x2080 (NOT denylisted): trailing 3 bytes = low MAC → kkm:<tail>
+  r = mk(); mergeIds(r, extractIds({ serviceData: new Map([['00002080-0000-1000-8000-00805f9b34fb', dvOf([0x72,0x00,0xff,0x0c,0x06,0xbc])]]) }));
+  chk(primaryId(r) === 'kkm:0c06bc', 'kkm-ext-2080', primaryId(r));
   // Named device is now recognized as a name-based (System-frame) beacon
   r = mk(); mergeIds(r, extractIds({ name: 'RandomDevice' }));
   chk(primaryId(r) === 'name:RandomDevice', 'name-based-beacon', primaryId(r));
