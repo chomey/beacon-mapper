@@ -114,7 +114,7 @@
 <script>
 // ---- config knobs -----------------------------------------------------------
 // Venue fallback center (used only if GPS is unavailable). Tune to your building.
-const VERSION = "system-decode-v10 · decodes KKM System frame (FEAA 0x22 / mfr 0x0A53) → system:MAC";
+const VERSION = "diag-v11 · per-row mfr/svc keys so you can see what actually reaches the browser";
 const DEFAULT_CENTER = [37.48412, -122.14993];
 const THUMB_DELTA = 0.0016;          // thumbnail bbox half-span in degrees (~zoom level)
 const EDDYSTONE_SVC = '0000feaa-0000-1000-8000-00805f9b34fb';
@@ -610,7 +610,14 @@ function renderScanList() {
     } else if (conv.ibeacon && conv.ibeacon !== pid) {
       extra = `<br><span style="color:#606770">${esc(conv.ibeacon)}</span>`;
     }
-    row.innerHTML = `<span class="bars">${signalBars(rec.rssi)}</span><span class="id"><b>${label}${esc(primaryKind(rec))}</b><br>${esc(pid)}${extra}</span><span class="sig">${rec.rssi} dBm</span>`;
+    // Diagnostic: show exactly which manufacturer company-ids and service UUIDs
+    // the browser actually delivered for this device. Reveals whether iBeacon
+    // (mfr 004c) crosses while Eddystone/System (svc feaa) does not.
+    const shortSvc = u => { const m = /^0000([0-9a-f]{4})-0000-1000-8000-00805f9b34fb$/i.exec(u); return m ? m[1] : u; };
+    const mfrKeys = Object.keys(rec.mfr || {}).join(',') || '—';
+    const svcKeys = Object.keys(rec.services || {}).map(shortSvc).join(',') || '—';
+    const diag = `mfr:[${mfrKeys}] svc:[${svcKeys}]`;
+    row.innerHTML = `<span class="bars">${signalBars(rec.rssi)}</span><span class="id"><b>${label}${esc(primaryKind(rec))}</b><br>${esc(pid)}${extra}<br><span style="color:#8a8d91;font-size:11px">${esc(diag)}</span></span><span class="sig">${rec.rssi} dBm</span>`;
     row.onclick = () => selectBeacon(rec);
     el.appendChild(row);
   });
